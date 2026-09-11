@@ -43,6 +43,7 @@ export class Catalog {
   }
   close(): void { this.db.close(); }
   addRoot(root: { id: string; path: string; role: string; createdAt: string }): void { this.db.prepare('INSERT OR REPLACE INTO roots VALUES (?,?,?,?)').run(root.id, root.role, root.path, root.createdAt); }
+  roots(): Array<{ id: string; role: string; path: string; createdAt: string }> { return (this.db.prepare('SELECT * FROM roots ORDER BY created_at').all() as any[]).map((row) => ({ id: row.id, role: row.role, path: row.native_path, createdAt: row.created_at })); }
   root(id: string): { id: string; role: string; path: string } | undefined { const row: any = this.db.prepare('SELECT * FROM roots WHERE id=?').get(id); return row && { id: row.id, role: row.role, path: row.native_path }; }
   createJob(rootId: string): string { const id = randomUUID(); this.db.prepare("INSERT INTO jobs(id,type,root_id,status,created_at) VALUES (?,'scan',?,'running',?)").run(id, rootId, new Date().toISOString()); return id; }
   finishJob(id: string, discovered: number, processed: number, errors: number): void { this.db.prepare("UPDATE jobs SET status='completed',discovered=?,processed=?,errors=?,finished_at=? WHERE id=?").run(discovered, processed, errors, new Date().toISOString(), id); }

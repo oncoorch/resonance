@@ -15,6 +15,10 @@ function sameIdentity(actual: { dev: number; ino: number }, expected: { dev: num
 export class RootGrants {
   #grants = new Map<string, StoredGrant>();
   async authorize(inputPath: string, role: RootRole): Promise<RootGrant> {
+    return this.#authorize(inputPath, role, randomUUID(), new Date().toISOString());
+  }
+  async restore(root: RootGrant): Promise<RootGrant> { return this.#authorize(root.path, root.role, root.id, root.createdAt); }
+  async #authorize(inputPath: string, role: RootRole, id: string, createdAt: string): Promise<RootGrant> {
     if (!path.isAbsolute(inputPath)) throw new Error('La ruta debe ser absoluta');
     const canonical = await realpath(inputPath); const stat = await lstat(canonical);
     if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error('La raíz debe ser un directorio real');
@@ -25,7 +29,7 @@ export class RootGrants {
       const existingInside = fromCandidate === '' || (!fromCandidate.startsWith('..') && !path.isAbsolute(fromCandidate));
       if (candidateInside || existingInside) throw new Error('Las raíces no pueden ser iguales ni anidadas');
     }
-    const grant = { id: randomUUID(), path: canonical, role, createdAt: new Date().toISOString(), dev: stat.dev, ino: stat.ino } satisfies StoredGrant;
+    const grant = { id, path: canonical, role, createdAt, dev: stat.dev, ino: stat.ino } satisfies StoredGrant;
     this.#grants.set(grant.id, grant); return this.#publicGrant(grant);
   }
   list(): RootGrant[] { return [...this.#grants.values()].map((grant) => this.#publicGrant(grant)); }

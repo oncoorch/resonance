@@ -33,6 +33,16 @@ const trackTarget = (track: any) => {
   return buildTargetRelativePath(track);
 };
 const foundAudit = (catalog: Catalog, rootId: string) => catalog.db.prepare('SELECT count(*) audioFiles,coalesce(sum(bytes),0) audioBytes FROM tracks WHERE root_id=? AND present=1').get(rootId);
+const spaceSuggestion = async (catalog: Catalog, sourceRootId: string, destinationRootId: string, requiredBytes: number) => {
+  const source = catalog.root(sourceRootId); const destination = catalog.root(destinationRootId);
+  if (!source || !destination) return undefined;
+  const [sourceInfo, destinationInfo, filesystem] = await Promise.all([lstat(source.path), lstat(destination.path), statfs(destination.path)]);
+  const availableBytes = filesystem.bavail * filesystem.bsize;
+  const sufficientForCopy = hasSufficientSpace(requiredBytes, filesystem.bavail, filesystem.bsize);
+  const sameVolume = sourceInfo.dev === destinationInfo.dev;
+  const suggestedStrategy = sufficientForCopy ? 'copy' : sameVolume ? 'move-same-disk' : 'free-space';
+  return { requiredBytes, availableBytes, sufficientForCopy, sameVolume, suggestedStrategy };
+};
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
@@ -48,6 +58,9 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
   const hosts = new Set(options.allowedHosts ?? ['127.0.0.1:4174', 'localhost:4174', '127.0.0.1:4888', 'localhost:4888', 'resonance.local:4888']);
   const nodeEnv = options.nodeEnv ?? process.env.NODE_ENV ?? 'development';
   const allowPathInput = options.allowPathInputForTests ?? (nodeEnv === 'test' || process.env.ALLOW_PATH_INPUT_FOR_TESTS === '1');
+  for (const root of catalog.roots()) {
+    if ((root.role === 'source' || root.role === 'destination')) await grants.restore({ id: root.id, role: root.role, path: root.path, createdAt: root.createdAt }).catch(() => undefined);
+  }
 
   app.addHook('onClose', async () => catalog.close());
   app.addHook('onRequest', async (request, reply) => {
@@ -213,7 +226,7 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
     const id = randomUUID(); const now = new Date().toISOString();
     const insertPlan = catalog.db.prepare("INSERT INTO organization_plans(id,source_root_id,destination_root_id,status,mode,manifest_json,created_at) VALUES (?,?,?,'preview',?,?,?)");
     const insertItem = catalog.db.prepare('INSERT INTO plan_items(id,plan_id,track_id,source_path,target_relative_path,source_size,source_mtime_ms,source_hash,status) VALUES (?,?,?,?,?,?,?,?,?)');
-    const items: any[] = [];
+    const items: any[] = []; let planSpace: any;
     try {
       for (const trackId of trackIds) {
         const track = catalog.track(trackId); if (!track || track.rootId !== source.id) throw new Error('TRACK_OUTSIDE_SOURCE');
@@ -229,10 +242,11 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
       const targetCounts = new Map<string, number>(); for (const item of items) { const key = item.targetRelativePath.normalize('NFC').toLocaleLowerCase(); targetCounts.set(key, (targetCounts.get(key) ?? 0) + 1); }
       for (const item of items) if ((targetCounts.get(item.targetRelativePath.normalize('NFC').toLocaleLowerCase()) ?? 0) > 1) item.status = 'conflict';
       const conflicts = items.filter((item) => item.status === 'conflict').length; const warnings = items.filter((item) => item.status.startsWith('warning_')).length;
-      const manifest = JSON.stringify({ mode, conflicts, warnings, audit: foundAudit(catalog, source.id), rulesVersion: 2, generatedAt: now });
+      const requiredBytes = items.reduce((sum, item) => sum + Number(item.sourceSize), 0); const space = await spaceSuggestion(catalog, source.id, destination.id, requiredBytes); planSpace = space;
+      const manifest = JSON.stringify({ mode, conflicts, warnings, audit: foundAudit(catalog, source.id), space, rulesVersion: 2, generatedAt: now });
       catalog.db.transaction(() => { insertPlan.run(id, source.id, destination.id, mode, manifest, now); for (const item of items) insertItem.run(item.id,id,item.trackId,item.sourcePath,item.targetRelativePath,item.sourceSize,item.sourceMtimeMs,item.sourceHash,item.status); })();
     } catch (error) { return reply.code(400).send({ error: safeErrorCode(error, 'PLAN_PREVIEW_FAILED') }); }
-    return reply.code(201).send({ id, status: 'preview', revision: 1, mode, conflicts: items.filter((item) => item.status === 'conflict').length, warnings: items.filter((item) => item.status.startsWith('warning_')).length, items: items.map((item) => ({ id: item.id, trackId: item.trackId, sourcePath: catalog.track(item.trackId)?.relativePath, targetRelativePath: item.targetRelativePath, sourceSize: item.sourceSize, sourceMtimeMs: item.sourceMtimeMs, status: item.status, conflict: item.status === 'conflict', warning: item.status.startsWith('warning_') })) });
+    return reply.code(201).send({ id, status: 'preview', revision: 1, mode, conflicts: items.filter((item) => item.status === 'conflict').length, warnings: items.filter((item) => item.status.startsWith('warning_')).length, space: planSpace, items: items.map((item) => ({ id: item.id, trackId: item.trackId, sourcePath: catalog.track(item.trackId)?.relativePath, targetRelativePath: item.targetRelativePath, sourceSize: item.sourceSize, sourceMtimeMs: item.sourceMtimeMs, status: item.status, conflict: item.status === 'conflict', warning: item.status.startsWith('warning_') })) });
   });
   app.post('/api/plans/preview-jobs', async (request, reply) => {
     const body = request.body as Body; const source = grants.get(body.sourceRootId); const destination = grants.get(body.destinationRootId);
@@ -256,9 +270,9 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
           items.push(item); current.processed += 1; current.conflicts = items.filter((row) => row.status === 'conflict').length; current.warnings = items.filter((row) => String(row.status).startsWith('warning_')).length;
         }
         current.phase = 'Revisando nombres duplicados internos'; const targetCounts = new Map<string, number>(); for (const item of items) { const key = item.targetRelativePath.normalize('NFC').toLocaleLowerCase(); targetCounts.set(key, (targetCounts.get(key) ?? 0) + 1); } for (const item of items) if ((targetCounts.get(item.targetRelativePath.normalize('NFC').toLocaleLowerCase()) ?? 0) > 1) item.status = 'conflict';
-        const conflicts = items.filter((item) => item.status === 'conflict').length; const warnings = items.filter((item) => item.status.startsWith('warning_')).length; const audit = foundAudit(catalog, source.id); const manifest = JSON.stringify({ mode, conflicts, warnings, audit, rulesVersion: 2, generatedAt: now });
+        const conflicts = items.filter((item) => item.status === 'conflict').length; const warnings = items.filter((item) => item.status.startsWith('warning_')).length; const audit = foundAudit(catalog, source.id); const requiredBytes = items.reduce((sum, item) => sum + Number(item.sourceSize), 0); const space = await spaceSuggestion(catalog, source.id, destination.id, requiredBytes); const manifest = JSON.stringify({ mode, conflicts, warnings, audit, space, rulesVersion: 2, generatedAt: now });
         catalog.db.transaction(() => { insertPlan.run(id, source.id, destination.id, mode, manifest, now); for (const item of items) insertItem.run(item.id,id,item.trackId,item.sourcePath,item.targetRelativePath,item.sourceSize,item.sourceMtimeMs,item.sourceHash,item.status); })();
-        current.state = 'completed'; current.phase = 'Revisión lista para aprobar'; current.conflicts = conflicts; current.warnings = warnings; current.plan = { id, status: 'preview', revision: 1, mode, conflicts, warnings, audit, items: items.map((item) => ({ id: item.id, trackId: item.trackId, sourcePath: catalog.track(item.trackId)?.relativePath, targetRelativePath: item.targetRelativePath, sourceSize: item.sourceSize, sourceMtimeMs: item.sourceMtimeMs, status: item.status, conflict: item.status === 'conflict', warning: item.status.startsWith('warning_') })) };
+        current.state = 'completed'; current.phase = 'Revisión lista para aprobar'; current.conflicts = conflicts; current.warnings = warnings; current.plan = { id, status: 'preview', revision: 1, mode, conflicts, warnings, audit, space, items: items.map((item) => ({ id: item.id, trackId: item.trackId, sourcePath: catalog.track(item.trackId)?.relativePath, targetRelativePath: item.targetRelativePath, sourceSize: item.sourceSize, sourceMtimeMs: item.sourceMtimeMs, status: item.status, conflict: item.status === 'conflict', warning: item.status.startsWith('warning_') })) };
       } catch (error) { current.state = 'failed'; current.phase = 'La revisión falló'; current.error = safeErrorCode(error, 'PLAN_PREVIEW_FAILED'); }
     });
     return reply.code(202).send({ jobId });
@@ -274,7 +288,8 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
     const result = catalog.db.prepare("UPDATE organization_plans SET status='approved',revision=revision+1,approved_at=? WHERE id=? AND status='preview' AND revision=?").run(new Date().toISOString(), id, revision);
     if (!result.changes) return reply.code(409).send({ error: 'PLAN_NOT_APPROVABLE' });
     const items = catalog.db.prepare('SELECT * FROM plan_items WHERE plan_id=? ORDER BY rowid').all(id) as any[];
-    return { id, revision: revision + 1, status: 'approved', conflicts: 0, warnings: items.filter((row) => String(row.status).startsWith('warning_')).length, items: items.map((row) => ({ id: row.id, trackId: row.track_id, sourcePath: catalog.track(row.track_id)?.relativePath, targetRelativePath: row.target_relative_path, sourceSize: row.source_size, status: row.status, warning: String(row.status).startsWith('warning_') })) };
+    const approvedPlan = catalog.db.prepare('SELECT manifest_json FROM organization_plans WHERE id=?').get(id) as any; const manifest = JSON.parse(approvedPlan?.manifest_json || '{}');
+    return { id, revision: revision + 1, status: 'approved', conflicts: 0, warnings: items.filter((row) => String(row.status).startsWith('warning_')).length, audit: manifest.audit, space: manifest.space, items: items.map((row) => ({ id: row.id, trackId: row.track_id, sourcePath: catalog.track(row.track_id)?.relativePath, targetRelativePath: row.target_relative_path, sourceSize: row.source_size, status: row.status, warning: String(row.status).startsWith('warning_') })) };
   });
   app.post('/api/plans/:id/apply', async (request, reply) => {
     const id = (request.params as Body).id; const plan: any = catalog.db.prepare('SELECT * FROM organization_plans WHERE id=?').get(id);
@@ -339,7 +354,7 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
     const plan = catalog.db.prepare('SELECT * FROM organization_plans ORDER BY created_at DESC LIMIT 1').get() as any; if (!plan) return null;
     const rows = catalog.db.prepare('SELECT * FROM plan_items WHERE plan_id=? ORDER BY rowid').all(plan.id) as any[];
     const manifest = JSON.parse(plan.manifest_json || '{}');
-    return { id: plan.id, revision: plan.revision, status: plan.status, mode: plan.mode, conflicts: rows.filter((row) => row.status === 'conflict').length, warnings: rows.filter((row) => String(row.status).startsWith('warning_')).length, audit: manifest.audit, items: rows.map((row) => ({ id: row.id, trackId: row.track_id, sourcePath: catalog.track(row.track_id)?.relativePath, targetRelativePath: row.target_relative_path, sourceSize: row.source_size, status: row.status, conflict: row.status === 'conflict', warning: String(row.status).startsWith('warning_') })) };
+    return { id: plan.id, revision: plan.revision, status: plan.status, mode: plan.mode, conflicts: rows.filter((row) => row.status === 'conflict').length, warnings: rows.filter((row) => String(row.status).startsWith('warning_')).length, audit: manifest.audit, space: manifest.space, items: rows.map((row) => ({ id: row.id, trackId: row.track_id, sourcePath: catalog.track(row.track_id)?.relativePath, targetRelativePath: row.target_relative_path, sourceSize: row.source_size, status: row.status, conflict: row.status === 'conflict', warning: String(row.status).startsWith('warning_') })) };
   });
 
   const organizerVerified = () => Number((catalog.db.prepare("SELECT count(*) count FROM organization_plans WHERE status='applied'").get() as any).count) > 0;
