@@ -12,11 +12,16 @@ Aplicación web local para analizar, revisar y organizar bibliotecas musicales g
   2. **REVISAR Y APROBAR**: congela la revisión, no escribe.
   3. **APLICAR Y EJECUTAR**: copia al destino en modo seguro.
 - Incluye **STOP** para detener una ejecución antes del siguiente archivo.
+- No bloquea todo el lote por pocos conflictos: aprueba y ejecuta lo seguro; lo ambiguo queda como **para revisión**.
 - Trata conflictos de destino así:
-  - archivo diferente o colisión interna: bloqueo;
-  - destino ya contiene el mismo archivo por tamaño/hash: advertencia aprobable, sin sobrescribir.
+  - mismo archivo por tamaño/hash: advertencia, sin duplicar;
+  - mismo nombre interno: crea una versión automática para conservar variantes;
+  - archivo diferente existente: queda para decidir si reemplazar, conservar como versión o ignorar.
+- Muestra estadísticas útiles: porcentaje de duplicación, procesados, ejecutables, para revisión, tamaño auditado y espacio disponible.
+- Incluye reproductor local básico para escuchar canciones antes de decidir.
 - Mantiene originales intactos. El modo seguro copia, verifica hash y registra rollback.
-- Exporta playlists compatibles con Apple Music solo después de verificar el organizador.
+- Genera playlists por favoritas, toda la biblioteca, género, artista o álbum; exporta M3U8 y XML para Música de Apple.
+- Incluye temas personalizables: Kawaii claro, Tokyo Night, GitHub Dark y Dracula.
 
 ## Seguridad
 
@@ -92,9 +97,9 @@ En macOS, para el flujo completo con selector nativo, se recomienda producción 
 3. Revisa la auditoría: cantidad de audios, bytes, no-audio ignorado y errores.
 4. Ve a Organización y autoriza destino.
 5. Pulsa **EJECUTAR REVISIÓN**.
-6. Corrige bloqueos si aparecen.
+6. Si hay casos ambiguos, revísalos después; no bloquean el resto.
 7. Pulsa **REVISAR Y APROBAR**. Esto no escribe.
-8. Pulsa **APLICAR Y EJECUTAR**. Esto copia al destino y verifica.
+8. Pulsa **APLICAR Y EJECUTAR**. Esto procesa todo lo seguro y deja los conflictos como revisión pendiente.
 9. Si detectas un error durante miles de operaciones, pulsa **STOP**.
 
 ## Apple Music

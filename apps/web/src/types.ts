@@ -5,6 +5,7 @@ export interface RootGrant { id: string; path: string; role: 'source' | 'destina
 export interface Stats {
   totalFiles: number; audioFiles: number; artists: number; albums: number; genres: number; bytes: number;
   complete: number; incomplete: number; duplicates: number; unidentified: number; errors: number; playlistsUnlocked: boolean;
+  duplicatePercent?: number;
 }
 export interface Track {
   id: string; originalTitle: string; title: string | null; artist: string | null; album: string | null;
@@ -15,11 +16,11 @@ export interface Track {
 export interface ScanAudit { directories?: number; entries?: number; audioFiles?: number; nonAudioFiles?: number; audioBytes?: number; totalBytes?: number }
 export interface ScanJob { id: string; state: 'queued' | 'running' | 'paused' | 'cancel_requested' | 'cancelled' | 'completed' | 'failed'; phase?: string; discovered: number; processed: number; errors: number; audit?: ScanAudit }
 export interface PlanItem { id: string; trackId: string; originalPath: string; destinationPath: string; selected: boolean; state?: string; conflict?: string | null; warning?: string | null; tagChanges?: Array<{ field: string; from: string | null; to: string | null }> }
-export interface Plan { id: string; revision: number; state: 'draft' | 'approved' | 'applying' | 'completed' | 'stale' | 'cancel_requested' | 'cancelled'; mode: Mode; items: PlanItem[]; estimatedBytes: number; excluded: number; conflicts: number; warnings?: number; audit?: ScanAudit; space?: { requiredBytes: number; availableBytes: number; sufficientForCopy: boolean; sameVolume: boolean; suggestedStrategy: 'copy' | 'move-same-disk' | 'free-space' } }
+export interface Plan { id: string; revision: number; state: 'draft' | 'approved' | 'applying' | 'completed' | 'stale' | 'cancel_requested' | 'cancelled'; mode: Mode; items: PlanItem[]; estimatedBytes: number; excluded: number; conflicts: number; warnings?: number; executable?: number; skipped?: number; audit?: ScanAudit; space?: { requiredBytes: number; availableBytes: number; sufficientForCopy: boolean; sameVolume: boolean; suggestedStrategy: 'copy' | 'move-same-disk' | 'free-space' } }
 export interface PlanBuildJob { id: string; state: 'queued' | 'running' | 'completed' | 'cancelled' | 'failed'; phase: string; processed: number; total: number; current?: string; conflicts?: number; warnings?: number; error?: string; plan?: Plan }
 export interface ProviderSettings { musicbrainzEnabled: boolean; openaiEnabled: boolean; webSearchEnabled: boolean; openaiConfigured: boolean; model: string | null; maxRequests: number; maxWebRequests: number }
 export type Language = 'es' | 'en';
-export type Theme = 'light' | 'dark';
+export type Theme = 'light' | 'tokyo' | 'github-dark' | 'dracula';
 export interface AppSettings { mode: Mode; updateTags: boolean; artwork: boolean; preserveArtwork: boolean; preferLossless: boolean; language: Language; theme: Theme; provider: ProviderSettings }
 export interface Playlist { id: string; name: string; rule: string; tracks: number; updatedAt?: string }
 export interface HistoryEntry { id: string; type: string; state: string; createdAt: string; files: number; verified: number; rollbackAvailable?: boolean }

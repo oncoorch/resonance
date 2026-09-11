@@ -75,11 +75,11 @@ describe('backend API vertical', () => {
     expect((await app.inject({ url: '/api/roots', headers: authHeaders })).json()).toMatchObject({ roots: [] });
   });
 
-  it('keeps playlists locked until one organization plan is fully verified', async () => {
+  it('keeps playlists locked until a real library scan exists', async () => {
     const { app, authHeaders } = await fixture();
-    const playlist = await app.inject({ method: 'POST', url: '/api/playlists', headers: authHeaders, payload: { name: 'Antes de verificar', rule: { favorite: true } } });
+    const playlist = await app.inject({ method: 'POST', url: '/api/playlists', headers: authHeaders, payload: { name: 'Antes de escanear', rule: { kind: 'favorites' } } });
     expect(playlist.statusCode).toBe(423);
-    expect(playlist.json()).toMatchObject({ error: 'ORGANIZER_NOT_VERIFIED' });
+    expect(playlist.json()).toMatchObject({ error: 'SCAN_LIBRARY_FIRST' });
     expect((await app.inject({ url: '/api/playlists', headers: authHeaders })).statusCode).toBe(423);
   });
 
@@ -135,7 +135,7 @@ describe('backend API vertical', () => {
     expect(await readFile(target)).toEqual(await readFile(original));
     expect((await app.inject({ method: 'PATCH', url: `/api/tracks/${track.id}/favorite`, headers: authHeaders, payload: { favorite: true } })).statusCode).toBe(200);
     expect((await app.inject({ method: 'POST', url: '/api/playlists', headers: authHeaders, payload: { name: 'Sin regla', rule: {} } })).statusCode).toBe(400);
-    const playlist = await app.inject({ method: 'POST', url: '/api/playlists', headers: authHeaders, payload: { name: 'Favoritas', rule: { favorite: true } } });
+    const playlist = await app.inject({ method: 'POST', url: '/api/playlists', headers: authHeaders, payload: { name: 'Favoritas', rule: { kind: 'favorites' } } });
     expect(playlist.json()).toMatchObject({ count: 1 });
     const exported = await app.inject({ method: 'POST', url: `/api/playlists/${playlist.json().id}/export`, headers: authHeaders, payload: { destinationRootId: dst.id, format: 'm3u8' } });
     expect(exported.statusCode).toBe(201);
@@ -149,7 +149,7 @@ describe('backend API vertical', () => {
     expect(await readFile(original)).toEqual(await readFile(path.join(source, 'Björk', 'Debut', '01 - Human Behaviour.wav')));
   });
 
-  it('detects case-insensitive internal target collisions before approval', async () => {
+  it('versions internal target collisions instead of blocking approval', async () => {
     const { app, source, destination, authHeaders } = await fixture();
     await mkdir(path.join(source, 'A')); await mkdir(path.join(source, 'B'));
     const fixtureAudio = path.join(source, 'Björk', 'Debut', '01 - Human Behaviour.wav');
@@ -160,7 +160,27 @@ describe('backend API vertical', () => {
     await app.inject({ method: 'POST', url: '/api/scan', headers: authHeaders, payload: { rootId: src.id } });
     const tracks = (await app.inject({ url: '/api/tracks?limit=100', headers: authHeaders })).json().items.filter((track: any) => track.originalFilename.toLowerCase() === 'collision.wav');
     const preview = await app.inject({ method: 'POST', url: '/api/plans/preview', headers: authHeaders, payload: { sourceRootId: src.id, destinationRootId: dst.id, trackIds: tracks.map((track: any) => track.id), mode: 'safe' } });
-    expect(preview.json()).toMatchObject({ conflicts: 2 });
-    expect((await app.inject({ method: 'POST', url: `/api/plans/${preview.json().id}/approve`, headers: authHeaders, payload: { revision: 1 } })).statusCode).toBe(409);
+    expect(preview.json().conflicts).toBe(0);
+    expect(new Set(preview.json().items.map((item: any) => item.targetRelativePath.toLowerCase())).size).toBe(2);
+    expect(preview.json().items.some((item: any) => item.targetRelativePath.includes('versión'))).toBe(true);
+    expect((await app.inject({ method: 'POST', url: `/api/plans/${preview.json().id}/approve`, headers: authHeaders, payload: { revision: 1 } })).statusCode).toBe(200);
+  });
+
+  it('approves plans with review conflicts and applies the safe subset', async () => {
+    const { app, source, destination, authHeaders } = await fixture();
+    const authorize = async (rootPath: string, role: string) => (await app.inject({ method: 'POST', url: '/api/roots/authorize', headers: authHeaders, payload: { path: rootPath, role } })).json();
+    const src = await authorize(source, 'source'); const dst = await authorize(destination, 'destination');
+    await app.inject({ method: 'POST', url: '/api/scan', headers: authHeaders, payload: { rootId: src.id } });
+    const track = (await app.inject({ url: '/api/tracks', headers: authHeaders })).json().items[0];
+    const previewClean = await app.inject({ method: 'POST', url: '/api/plans/preview', headers: authHeaders, payload: { sourceRootId: src.id, destinationRootId: dst.id, trackIds: [track.id], mode: 'safe' } });
+    await mkdir(path.dirname(path.join(destination, previewClean.json().items[0].targetRelativePath)), { recursive: true });
+    await writeFile(path.join(destination, previewClean.json().items[0].targetRelativePath), 'different recording');
+    const preview = await app.inject({ method: 'POST', url: '/api/plans/preview', headers: authHeaders, payload: { sourceRootId: src.id, destinationRootId: dst.id, trackIds: [track.id], mode: 'safe' } });
+    expect(preview.json()).toMatchObject({ conflicts: 1, executable: 0 });
+    const approved = await app.inject({ method: 'POST', url: `/api/plans/${preview.json().id}/approve`, headers: authHeaders, payload: { revision: preview.json().revision } });
+    expect(approved.statusCode).toBe(200);
+    const applied = await app.inject({ method: 'POST', url: `/api/plans/${preview.json().id}/apply`, headers: authHeaders, payload: { revision: approved.json().revision } });
+    expect(applied.statusCode).toBe(200);
+    expect(applied.json()).toMatchObject({ copied: 0, skipped: 1, failed: 0 });
   });
 });

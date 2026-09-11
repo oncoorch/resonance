@@ -1,6 +1,7 @@
 import Fastify, { type FastifyInstance } from 'fastify';
 import cookie from '@fastify/cookie';
 import { randomBytes, randomUUID } from 'node:crypto';
+import { createReadStream } from 'node:fs';
 import { lstat, stat, statfs } from 'node:fs/promises';
 import path from 'node:path';
 import { Catalog } from './db/catalog.js';
@@ -31,6 +32,33 @@ const cleanSegment = (value: string) => {
 const safeErrorCode = (error: unknown, fallback: string) => typeof (error as any)?.code === 'string' ? (error as any).code : ['TRACK_OUTSIDE_SOURCE','TRACK_NOT_FOUND','SOURCE_CAPABILITY_MISMATCH','SOURCE_CHANGED'].includes((error as Error)?.message) ? (error as Error).message : fallback;
 const trackTarget = (track: any) => {
   return buildTargetRelativePath(track);
+};
+const versionedRelativePath = (relativePath: string, version: number) => {
+  const parsed = path.parse(relativePath);
+  return path.join(parsed.dir, `${parsed.name} (versión ${version})${parsed.ext}`);
+};
+const normalizeTargetKey = (relativePath: string) => relativePath.normalize('NFC').toLocaleLowerCase();
+const autoVersionInternalCollisions = (items: any[]) => {
+  const seen = new Map<string, number>();
+  for (const item of items) {
+    const key = normalizeTargetKey(item.targetRelativePath);
+    const next = (seen.get(key) ?? 0) + 1;
+    if (next === 1) { seen.set(key, 1); continue; }
+    let version = next;
+    let candidate = versionedRelativePath(item.targetRelativePath, version);
+    while (seen.has(normalizeTargetKey(candidate))) { version += 1; candidate = versionedRelativePath(item.targetRelativePath, version); }
+    item.targetRelativePath = candidate;
+    item.status = item.status === 'planned' ? 'warning_versioned_variant' : item.status;
+    seen.set(key, next); seen.set(normalizeTargetKey(candidate), 1);
+  }
+};
+const summarizePlanItems = (items: any[]) => {
+  const conflicts = items.filter((item) => item.status === 'conflict').length;
+  const warnings = items.filter((item) => String(item.status).startsWith('warning_')).length;
+  const executable = items.filter((item) => item.status !== 'conflict').length;
+  const skipped = items.filter((item) => item.status === 'conflict').length;
+  const executableBytes = items.filter((item) => item.status !== 'conflict' && item.status !== 'warning_existing_verified').reduce((sum, item) => sum + Number(item.sourceSize ?? item.source_size ?? 0), 0);
+  return { conflicts, warnings, executable, skipped, executableBytes };
 };
 const foundAudit = (catalog: Catalog, rootId: string) => catalog.db.prepare('SELECT count(*) audioFiles,coalesce(sum(bytes),0) audioBytes FROM tracks WHERE root_id=? AND present=1').get(rootId);
 const spaceSuggestion = async (catalog: Catalog, sourceRootId: string, destinationRootId: string, requiredBytes: number) => {
@@ -171,11 +199,22 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
     if (!catalog.setFavorite((request.params as Body).id, value)) return reply.code(404).send({ error: 'TRACK_NOT_FOUND' });
     return publicTrack(catalog.track((request.params as Body).id));
   });
+  app.get('/api/tracks/:id/audio', async (request, reply) => {
+    const track = catalog.track((request.params as Body).id); if (!track) return reply.code(404).send({ error: 'TRACK_NOT_FOUND' });
+    const root = grants.get(track.rootId); if (!root) return reply.code(409).send({ error: 'SOURCE_NOT_AUTHORIZED' });
+    const resolved = await grants.resolve(track.rootId, track.relativePath);
+    if (resolved !== track.originalPath) return reply.code(409).send({ error: 'SOURCE_CAPABILITY_MISMATCH' });
+    const info = await stat(resolved); if (!info.isFile()) return reply.code(404).send({ error: 'TRACK_NOT_FOUND' });
+    reply.header('Content-Type', String(track.format ?? '').toUpperCase().includes('WAVE') ? 'audio/wav' : 'audio/mpeg');
+    reply.header('Content-Length', info.size);
+    reply.header('Accept-Ranges', 'none');
+    return reply.send(createReadStream(resolved));
+  });
   app.get('/api/stats', async () => {
     const stats = catalog.stats();
     const extra = catalog.db.prepare("SELECT count(DISTINCT genre) genres,sum(CASE WHEN title IS NOT NULL AND artist IS NOT NULL THEN 1 ELSE 0 END) complete,sum(CASE WHEN title IS NULL OR artist IS NULL THEN 1 ELSE 0 END) incomplete,sum(CASE WHEN title IS NULL OR artist IS NULL THEN 1 ELSE 0 END) unidentified FROM tracks WHERE present=1").get() as any;
     const duplicateRows = catalog.db.prepare('SELECT count(*) count FROM tracks WHERE present=1 AND sha256 IN (SELECT sha256 FROM tracks WHERE present=1 AND sha256 IS NOT NULL GROUP BY sha256 HAVING count(*)>1)').get() as any;
-    const playlistsUnlocked = Number((catalog.db.prepare("SELECT count(*) count FROM organization_plans WHERE status='applied'").get() as any).count) > 0;
+    const playlistsUnlocked = Number((catalog.db.prepare("SELECT count(*) count FROM tracks WHERE present=1").get() as any).count) > 0;
     return { ...stats, genres: extra.genres, complete: extra.complete ?? 0, incomplete: extra.incomplete ?? 0, unidentified: extra.unidentified ?? 0, duplicates: duplicateRows.count ?? 0, playlistsUnlocked };
   });
   app.get('/api/library/:kind', async (request, reply) => {
@@ -207,7 +246,8 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
     if (!body || typeof body !== 'object' || Array.isArray(body) || Object.keys(body).some((key) => !allowed.has(key))) return reply.code(400).send({ error: 'SETTING_INVALID' });
     if (body.mode !== undefined && !['simulation', 'safe'].includes(body.mode)) return reply.code(400).send({ error: 'MODE_INVALID' });
     if (body.language !== undefined && !['es', 'en'].includes(body.language)) return reply.code(400).send({ error: 'LANGUAGE_INVALID' });
-    if (body.theme !== undefined && !['light', 'dark'].includes(body.theme)) return reply.code(400).send({ error: 'THEME_INVALID' });
+    if (body.theme !== undefined && !['light', 'tokyo', 'github-dark', 'dracula', 'dark'].includes(body.theme)) return reply.code(400).send({ error: 'THEME_INVALID' });
+    if (body.theme === 'dark') body.theme = 'tokyo';
     for (const key of ['internetEnabled','openaiEnabled']) if (body[key] !== undefined && typeof body[key] !== 'boolean') return reply.code(400).send({ error: 'SETTING_INVALID' });
     for (const key of ['openaiModel','musicBrainzContact']) if (body[key] !== undefined && body[key] !== null && (typeof body[key] !== 'string' || body[key].length < 1 || body[key].length > 128)) return reply.code(400).send({ error: 'SETTING_INVALID' });
     return catalog.updateSettings(body);
@@ -226,7 +266,7 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
     const id = randomUUID(); const now = new Date().toISOString();
     const insertPlan = catalog.db.prepare("INSERT INTO organization_plans(id,source_root_id,destination_root_id,status,mode,manifest_json,created_at) VALUES (?,?,?,'preview',?,?,?)");
     const insertItem = catalog.db.prepare('INSERT INTO plan_items(id,plan_id,track_id,source_path,target_relative_path,source_size,source_mtime_ms,source_hash,status) VALUES (?,?,?,?,?,?,?,?,?)');
-    const items: any[] = []; let planSpace: any;
+    const items: any[] = []; let planSpace: any; let planSummary: any;
     try {
       for (const trackId of trackIds) {
         const track = catalog.track(trackId); if (!track || track.rootId !== source.id) throw new Error('TRACK_OUTSIDE_SOURCE');
@@ -239,14 +279,13 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
         } catch (error: any) { if (error.code !== 'ENOENT') throw error; }
         items.push(item);
       }
-      const targetCounts = new Map<string, number>(); for (const item of items) { const key = item.targetRelativePath.normalize('NFC').toLocaleLowerCase(); targetCounts.set(key, (targetCounts.get(key) ?? 0) + 1); }
-      for (const item of items) if ((targetCounts.get(item.targetRelativePath.normalize('NFC').toLocaleLowerCase()) ?? 0) > 1) item.status = 'conflict';
-      const conflicts = items.filter((item) => item.status === 'conflict').length; const warnings = items.filter((item) => item.status.startsWith('warning_')).length;
-      const requiredBytes = items.reduce((sum, item) => sum + Number(item.sourceSize), 0); const space = await spaceSuggestion(catalog, source.id, destination.id, requiredBytes); planSpace = space;
-      const manifest = JSON.stringify({ mode, conflicts, warnings, audit: foundAudit(catalog, source.id), space, rulesVersion: 2, generatedAt: now });
+      autoVersionInternalCollisions(items);
+      const summary = summarizePlanItems(items); planSummary = summary;
+      const requiredBytes = summary.executableBytes; const space = await spaceSuggestion(catalog, source.id, destination.id, requiredBytes); planSpace = space;
+      const manifest = JSON.stringify({ mode, ...summary, audit: foundAudit(catalog, source.id), space, rulesVersion: 3, generatedAt: now });
       catalog.db.transaction(() => { insertPlan.run(id, source.id, destination.id, mode, manifest, now); for (const item of items) insertItem.run(item.id,id,item.trackId,item.sourcePath,item.targetRelativePath,item.sourceSize,item.sourceMtimeMs,item.sourceHash,item.status); })();
     } catch (error) { return reply.code(400).send({ error: safeErrorCode(error, 'PLAN_PREVIEW_FAILED') }); }
-    return reply.code(201).send({ id, status: 'preview', revision: 1, mode, conflicts: items.filter((item) => item.status === 'conflict').length, warnings: items.filter((item) => item.status.startsWith('warning_')).length, space: planSpace, items: items.map((item) => ({ id: item.id, trackId: item.trackId, sourcePath: catalog.track(item.trackId)?.relativePath, targetRelativePath: item.targetRelativePath, sourceSize: item.sourceSize, sourceMtimeMs: item.sourceMtimeMs, status: item.status, conflict: item.status === 'conflict', warning: item.status.startsWith('warning_') })) });
+    return reply.code(201).send({ id, status: 'preview', revision: 1, mode, ...(planSummary ?? summarizePlanItems(items)), space: planSpace, items: items.map((item) => ({ id: item.id, trackId: item.trackId, sourcePath: catalog.track(item.trackId)?.relativePath, targetRelativePath: item.targetRelativePath, sourceSize: item.sourceSize, sourceMtimeMs: item.sourceMtimeMs, status: item.status, conflict: item.status === 'conflict', warning: item.status.startsWith('warning_') })) });
   });
   app.post('/api/plans/preview-jobs', async (request, reply) => {
     const body = request.body as Body; const source = grants.get(body.sourceRootId); const destination = grants.get(body.destinationRootId);
@@ -269,10 +308,10 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
           try { const existing = await lstat(path.join(destination.path, targetRelativePath)); if (existing.isFile() && existing.size === track.bytes && await sha256File(path.join(destination.path, targetRelativePath)) === sourceHash) item.status = 'warning_existing_verified'; else item.status = 'conflict'; } catch (error: any) { if (error.code !== 'ENOENT') throw error; }
           items.push(item); current.processed += 1; current.conflicts = items.filter((row) => row.status === 'conflict').length; current.warnings = items.filter((row) => String(row.status).startsWith('warning_')).length;
         }
-        current.phase = 'Revisando nombres duplicados internos'; const targetCounts = new Map<string, number>(); for (const item of items) { const key = item.targetRelativePath.normalize('NFC').toLocaleLowerCase(); targetCounts.set(key, (targetCounts.get(key) ?? 0) + 1); } for (const item of items) if ((targetCounts.get(item.targetRelativePath.normalize('NFC').toLocaleLowerCase()) ?? 0) > 1) item.status = 'conflict';
-        const conflicts = items.filter((item) => item.status === 'conflict').length; const warnings = items.filter((item) => item.status.startsWith('warning_')).length; const audit = foundAudit(catalog, source.id); const requiredBytes = items.reduce((sum, item) => sum + Number(item.sourceSize), 0); const space = await spaceSuggestion(catalog, source.id, destination.id, requiredBytes); const manifest = JSON.stringify({ mode, conflicts, warnings, audit, space, rulesVersion: 2, generatedAt: now });
+        current.phase = 'Creando versiones para canciones con el mismo nombre'; autoVersionInternalCollisions(items);
+        const summary = summarizePlanItems(items); const audit = foundAudit(catalog, source.id); const space = await spaceSuggestion(catalog, source.id, destination.id, summary.executableBytes); const manifest = JSON.stringify({ mode, ...summary, audit, space, rulesVersion: 3, generatedAt: now });
         catalog.db.transaction(() => { insertPlan.run(id, source.id, destination.id, mode, manifest, now); for (const item of items) insertItem.run(item.id,id,item.trackId,item.sourcePath,item.targetRelativePath,item.sourceSize,item.sourceMtimeMs,item.sourceHash,item.status); })();
-        current.state = 'completed'; current.phase = 'Revisión lista para aprobar'; current.conflicts = conflicts; current.warnings = warnings; current.plan = { id, status: 'preview', revision: 1, mode, conflicts, warnings, audit, space, items: items.map((item) => ({ id: item.id, trackId: item.trackId, sourcePath: catalog.track(item.trackId)?.relativePath, targetRelativePath: item.targetRelativePath, sourceSize: item.sourceSize, sourceMtimeMs: item.sourceMtimeMs, status: item.status, conflict: item.status === 'conflict', warning: item.status.startsWith('warning_') })) };
+        current.state = 'completed'; current.phase = 'Revisión lista para aprobar'; current.conflicts = summary.conflicts; current.warnings = summary.warnings; current.plan = { id, status: 'preview', revision: 1, mode, ...summary, audit, space, items: items.map((item) => ({ id: item.id, trackId: item.trackId, sourcePath: catalog.track(item.trackId)?.relativePath, targetRelativePath: item.targetRelativePath, sourceSize: item.sourceSize, sourceMtimeMs: item.sourceMtimeMs, status: item.status, conflict: item.status === 'conflict', warning: item.status.startsWith('warning_') })) };
       } catch (error) { current.state = 'failed'; current.phase = 'La revisión falló'; current.error = safeErrorCode(error, 'PLAN_PREVIEW_FAILED'); }
     });
     return reply.code(202).send({ jobId });
@@ -283,13 +322,12 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
   app.post('/api/plans/:id/approve', async (request, reply) => {
     const id = (request.params as Body).id; const revision = Number((request.body as Body)?.revision);
     if (!Number.isInteger(revision)) return reply.code(400).send({ error: 'PLAN_REVISION_REQUIRED' });
-    const conflicts = Number((catalog.db.prepare("SELECT count(*) count FROM plan_items WHERE plan_id=? AND status='conflict'").get(id) as any)?.count ?? 0);
-    if (conflicts) return reply.code(409).send({ error: 'PLAN_HAS_CONFLICTS', conflicts });
     const result = catalog.db.prepare("UPDATE organization_plans SET status='approved',revision=revision+1,approved_at=? WHERE id=? AND status='preview' AND revision=?").run(new Date().toISOString(), id, revision);
     if (!result.changes) return reply.code(409).send({ error: 'PLAN_NOT_APPROVABLE' });
     const items = catalog.db.prepare('SELECT * FROM plan_items WHERE plan_id=? ORDER BY rowid').all(id) as any[];
     const approvedPlan = catalog.db.prepare('SELECT manifest_json FROM organization_plans WHERE id=?').get(id) as any; const manifest = JSON.parse(approvedPlan?.manifest_json || '{}');
-    return { id, revision: revision + 1, status: 'approved', conflicts: 0, warnings: items.filter((row) => String(row.status).startsWith('warning_')).length, audit: manifest.audit, space: manifest.space, items: items.map((row) => ({ id: row.id, trackId: row.track_id, sourcePath: catalog.track(row.track_id)?.relativePath, targetRelativePath: row.target_relative_path, sourceSize: row.source_size, status: row.status, warning: String(row.status).startsWith('warning_') })) };
+    const summary = summarizePlanItems(items);
+    return { id, revision: revision + 1, status: 'approved', ...summary, audit: manifest.audit, space: manifest.space, items: items.map((row) => ({ id: row.id, trackId: row.track_id, sourcePath: catalog.track(row.track_id)?.relativePath, targetRelativePath: row.target_relative_path, sourceSize: row.source_size, status: row.status, conflict: row.status === 'conflict', warning: String(row.status).startsWith('warning_') })) };
   });
   app.post('/api/plans/:id/apply', async (request, reply) => {
     const id = (request.params as Body).id; const plan: any = catalog.db.prepare('SELECT * FROM organization_plans WHERE id=?').get(id);
@@ -297,14 +335,15 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
     const revision = Number((request.body as Body)?.revision); if (!Number.isInteger(revision) || revision !== plan.revision) return reply.code(409).send({ error: 'PLAN_REVISION_STALE' });
     if (plan.mode !== 'safe') return reply.code(409).send({ error: 'SIMULATION_CANNOT_WRITE' });
     const destination = grants.get(plan.destination_root_id); if (!destination) return reply.code(409).send({ error: 'DESTINATION_NOT_AUTHORIZED' });
-    const items = catalog.db.prepare('SELECT * FROM plan_items WHERE plan_id=? ORDER BY rowid').all(id) as any[]; const operations: any[] = []; let copied = 0; let failed = 0;
-    const filesystem = await statfs(destination.path); const requiredBytes = items.reduce((sum, item) => sum + Number(item.source_size), 0);
+    const items = catalog.db.prepare('SELECT * FROM plan_items WHERE plan_id=? ORDER BY rowid').all(id) as any[]; const operations: any[] = []; let copied = 0; let skipped = 0; let failed = 0;
+    const filesystem = await statfs(destination.path); const requiredBytes = summarizePlanItems(items).executableBytes;
     if (!hasSufficientSpace(requiredBytes, filesystem.bavail, filesystem.bsize)) return reply.code(507).send({ error: 'INSUFFICIENT_DESTINATION_SPACE', requiredBytes });
     const claimed = catalog.db.prepare("UPDATE organization_plans SET status='applying',revision=revision+1 WHERE id=? AND status='approved' AND revision=?").run(id,revision);
     if (!claimed.changes) return reply.code(409).send({ error: 'PLAN_ALREADY_CLAIMED' });
     const runApply = async () => {
       for (const item of items) {
         const stop = catalog.db.prepare('SELECT status FROM organization_plans WHERE id=?').get(id) as any; if (stop?.status === 'cancel_requested') { catalog.db.prepare("UPDATE organization_plans SET status='cancelled' WHERE id=?").run(id); return; }
+        if (item.status === 'conflict') { skipped += 1; catalog.db.prepare("UPDATE plan_items SET status='review_pending' WHERE id=?").run(item.id); operations.push({ id: randomUUID(), destination: item.target_relative_path, state: 'review_pending', error: 'NEEDS_USER_DECISION' }); continue; }
         const operationId = randomUUID(); let destinationPath: string; let sourcePath: string;
         try {
           const track = catalog.track(item.track_id); if (!track) throw new Error('TRACK_NOT_FOUND');
@@ -323,7 +362,7 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
       const cancelled = Number((catalog.db.prepare("SELECT count(*) count FROM operations WHERE plan_id=? AND error='PLAN_CANCELLED'").get(id) as any).count) > 0;
       catalog.db.prepare('UPDATE organization_plans SET status=? WHERE id=?').run(cancelled ? 'cancelled' : failed ? 'failed' : 'applied', id);
     };
-    if (allowPathInput) { await runApply(); return { jobId: id, revision: revision + 1, copied, failed, operations }; }
+    if (allowPathInput) { await runApply(); return { jobId: id, revision: revision + 1, copied, skipped, failed, operations }; }
     setImmediate(() => { void runApply(); });
     return reply.code(202).send({ jobId: id, revision: revision + 1, state: 'applying' });
   });
@@ -353,32 +392,37 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
   app.get('/api/plans/current', async () => {
     const plan = catalog.db.prepare('SELECT * FROM organization_plans ORDER BY created_at DESC LIMIT 1').get() as any; if (!plan) return null;
     const rows = catalog.db.prepare('SELECT * FROM plan_items WHERE plan_id=? ORDER BY rowid').all(plan.id) as any[];
-    const manifest = JSON.parse(plan.manifest_json || '{}');
-    return { id: plan.id, revision: plan.revision, status: plan.status, mode: plan.mode, conflicts: rows.filter((row) => row.status === 'conflict').length, warnings: rows.filter((row) => String(row.status).startsWith('warning_')).length, audit: manifest.audit, space: manifest.space, items: rows.map((row) => ({ id: row.id, trackId: row.track_id, sourcePath: catalog.track(row.track_id)?.relativePath, targetRelativePath: row.target_relative_path, sourceSize: row.source_size, status: row.status, conflict: row.status === 'conflict', warning: String(row.status).startsWith('warning_') })) };
+    const manifest = JSON.parse(plan.manifest_json || '{}'); const summary = summarizePlanItems(rows);
+    return { id: plan.id, revision: plan.revision, status: plan.status, mode: plan.mode, ...summary, audit: manifest.audit, space: manifest.space, items: rows.map((row) => ({ id: row.id, trackId: row.track_id, sourcePath: catalog.track(row.track_id)?.relativePath, targetRelativePath: row.target_relative_path, sourceSize: row.source_size, status: row.status, conflict: row.status === 'conflict', warning: String(row.status).startsWith('warning_') })) };
   });
 
-  const organizerVerified = () => Number((catalog.db.prepare("SELECT count(*) count FROM organization_plans WHERE status='applied'").get() as any).count) > 0;
+  const organizerVerified = () => Number((catalog.db.prepare("SELECT count(*) count FROM tracks WHERE present=1").get() as any).count) > 0;
+  const playlistTracksForRule = (rule: Body) => {
+    let sql = 'SELECT * FROM tracks WHERE present=1'; const params: unknown[] = [];
+    if (rule.kind === 'favorites') sql += ' AND favorite=1';
+    else if (['genre','artist','album'].includes(rule.kind) && typeof rule.value === 'string' && rule.value.trim()) { sql += ` AND ${rule.kind}=?`; params.push(rule.value.trim()); }
+    else if (rule.kind !== 'all') throw Object.assign(new Error('PLAYLIST_RULE_UNSUPPORTED'), { code: 'PLAYLIST_RULE_UNSUPPORTED' });
+    return (catalog.db.prepare(`${sql} ORDER BY artist COLLATE NOCASE, album COLLATE NOCASE, track_no, title COLLATE NOCASE`).all(...params) as any[]);
+  };
   app.post('/api/playlists', async (request, reply) => {
-    if (!organizerVerified()) return reply.code(423).send({ error: 'ORGANIZER_NOT_VERIFIED' });
+    if (!organizerVerified()) return reply.code(423).send({ error: 'SCAN_LIBRARY_FIRST' });
     const body = request.body as Body; if (typeof body?.name !== 'string' || !body.name.trim() || typeof body.rule !== 'object' || body.rule === null || Array.isArray(body.rule)) return reply.code(400).send({ error: 'PLAYLIST_INVALID' });
-    const id = randomUUID(); const rule = body.rule as Body;
-    if (Object.keys(rule).length !== 1 || rule.favorite !== true) return reply.code(400).send({ error: 'PLAYLIST_RULE_UNSUPPORTED' });
-    let tracks = catalog.tracks(100000, 0).filter((track) => track.finalPath);
-    tracks = tracks.filter((track) => track.favorite);
+    const id = randomUUID(); const rule = body.rule as Body; let tracks: any[];
+    try { tracks = playlistTracksForRule(rule); } catch (error) { return reply.code(400).send({ error: safeErrorCode(error, 'PLAYLIST_RULE_UNSUPPORTED') }); }
     catalog.db.transaction(() => { catalog.db.prepare('INSERT INTO playlists VALUES (?,?,?,?)').run(id,body.name.trim(),JSON.stringify(rule),new Date().toISOString()); const insert = catalog.db.prepare('INSERT INTO playlist_tracks VALUES (?,?,?)'); tracks.forEach((track,index) => insert.run(id,track.id,index)); })();
     return reply.code(201).send({ id, name: body.name.trim(), count: tracks.length, rule });
   });
   app.get('/api/playlists', async (_request, reply) => {
-    if (!organizerVerified()) return reply.code(423).send({ error: 'ORGANIZER_NOT_VERIFIED' });
+    if (!organizerVerified()) return reply.code(423).send({ error: 'SCAN_LIBRARY_FIRST' });
     const rows = catalog.db.prepare('SELECT p.*,count(pt.track_id) tracks FROM playlists p LEFT JOIN playlist_tracks pt ON pt.playlist_id=p.id GROUP BY p.id ORDER BY p.created_at DESC').all() as any[];
-    return { items: rows.map((row) => ({ id: row.id, name: row.name, rule: JSON.parse(row.rule_json).favorite ? 'favorites' : 'custom', tracks: row.tracks, updatedAt: row.created_at })) };
+    return { items: rows.map((row) => { const rule = JSON.parse(row.rule_json); return { id: row.id, name: row.name, rule: rule.kind === 'favorites' ? 'Favoritas' : rule.kind === 'all' ? 'Toda la biblioteca' : `${rule.kind}: ${rule.value}`, tracks: row.tracks, updatedAt: row.created_at }; }) };
   });
   app.post('/api/playlists/:id/export', async (request, reply) => {
-    if (!organizerVerified()) return reply.code(423).send({ error: 'ORGANIZER_NOT_VERIFIED' });
+    if (!organizerVerified()) return reply.code(423).send({ error: 'SCAN_LIBRARY_FIRST' });
     const id = (request.params as Body).id; const body = request.body as Body; const destination = grants.get(body.destinationRootId); const playlist: any = catalog.db.prepare('SELECT * FROM playlists WHERE id=?').get(id);
     if (!playlist || !destination || destination.role !== 'destination' || !['m3u8','apple-xml'].includes(body.format)) return reply.code(400).send({ error: 'EXPORT_INVALID' });
     const rows = catalog.db.prepare('SELECT t.* FROM playlist_tracks p JOIN tracks t ON t.id=p.track_id WHERE p.playlist_id=? ORDER BY p.position').all(id) as any[];
-    const tracks = rows.filter((row) => row.final_path).map((row) => ({ id: row.id, title: row.title ?? row.original_filename, artist: row.artist ?? 'Artista desconocido', duration: row.duration ?? 0, absolutePath: row.final_path }));
+    const tracks = rows.map((row) => ({ id: row.id, title: row.title ?? row.original_filename, artist: row.artist ?? 'Artista desconocido', duration: row.duration ?? 0, absolutePath: row.final_path ?? row.original_path }));
     const extension = body.format === 'm3u8' ? '.m3u8' : '.xml'; const relativeTarget = path.join('_Playlists', cleanSegment(playlist.name) + extension); const target = await grants.resolve(body.destinationRootId, relativeTarget); const dir = path.dirname(target);
     const content = body.format === 'm3u8' ? exportM3U8(playlist.name, tracks, dir) : exportAppleXml(playlist.name, tracks);
     await writeTextNoClobber(target, content);
