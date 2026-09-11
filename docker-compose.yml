@@ -1,0 +1,16 @@
+services:
+  resonance:
+    build: .
+    ports:
+      - "127.0.0.1:4888:4888"
+    environment:
+      NODE_ENV: production
+      PORT: 4888
+      MLO_DB_PATH: /data/catalog.db
+    volumes:
+      - resonance-data:/data
+      # Monta música/destino explícitamente si usas Docker:
+      # - /Users/Rattio/Downloads/Pulga Music:/music/source:ro
+      # - /Users/Rattio/Music/Resonancia:/music/destination
+volumes:
+  resonance-data:

@@ -1,0 +1,51 @@
+import { useEffect, useMemo, useState } from 'react';
+import { Icon } from '../../components/Icon';
+import { Dialog, EmptyState, Notice } from '../../components/Primitives';
+import { api } from '../../lib/api';
+import { confidenceTone, formatDuration } from '../../lib/library';
+import type { Track } from '../../types';
+
+const FILTERS = [
+  ['all', 'Todas'], ['low', 'Confianza < 80'], ['missing-album', 'Sin álbum'], ['missing-artist', 'Sin artista'], ['missing-genre', 'Sin género'],
+  ['duplicates', 'Duplicados'], ['review', 'Revisar'], ['openai', 'IA'], ['musicbrainz', 'MusicBrainz'],
+] as const;
+
+export function ConfidenceBadge({ value }: { value: number | null }) {
+  const tone = confidenceTone(value);
+  return <span className={`confidence confidence-${tone}`}><i/>{value === null ? 'Sin evaluar' : `${value}% · ${tone}`}</span>;
+}
+
+export function TrackTable({ initialFilter = 'all' }: { initialFilter?: string }) {
+  const [tracks, setTracks] = useState<Track[]>([]); const [total, setTotal] = useState(0);
+  const [query, setQuery] = useState(''); const [filter, setFilter] = useState(initialFilter); const [sort, setSort] = useState('title');
+  const [loading, setLoading] = useState(true); const [error, setError] = useState<string | null>(null);
+  const [selected, setSelected] = useState<Set<string>>(new Set()); const [editing, setEditing] = useState<Track | null>(null);
+  const [candidate, setCandidate] = useState<Awaited<ReturnType<typeof api.identifyTrack>> | null>(null); const [identifying, setIdentifying] = useState(false);
+  const params = useMemo(() => { const value = new URLSearchParams({ q: query, filter, sort, limit: '100' }); return value; }, [query, filter, sort]);
+  useEffect(() => { let active = true; setLoading(true); const timer = window.setTimeout(() => void api.tracks(params).then((response) => { if (active) { setTracks(response.items); setTotal(response.total); setError(null); } }).catch((reason) => active && setError(reason instanceof Error ? reason.message : 'No se pudieron cargar las canciones')).finally(() => active && setLoading(false)), 180); return () => { active = false; window.clearTimeout(timer); }; }, [params]);
+  useEffect(() => setFilter(initialFilter), [initialFilter]);
+
+  const toggleAll = () => setSelected(selected.size === tracks.length ? new Set() : new Set(tracks.map((track) => track.id)));
+  const save = async (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault(); if (!editing) return;
+    const data = new FormData(event.currentTarget);
+    const updated = await api.patchTrack(editing.id, { title: String(data.get('title')) || null, artist: String(data.get('artist')) || null, album: String(data.get('album')) || null, genre: String(data.get('genre')) || null });
+    setTracks((current) => current.map((track) => track.id === updated.id ? updated : track)); setEditing(null);
+  };
+  const favorite = async (track: Track) => { const updated = await api.patchTrack(track.id, { favorite: !track.favorite }); setTracks((current) => current.map((item) => item.id === updated.id ? updated : item)); };
+  const identify = async () => { if (!editing) return; setIdentifying(true); try { setCandidate(await api.identifyTrack(editing.id)); } catch (reason) { setError(reason instanceof Error ? reason.message : 'No se pudo consultar el proveedor'); } finally { setIdentifying(false); } };
+  const acceptCandidate = async () => { if (!editing || candidate?.status !== 'candidate') return; const updated = await api.patchTrack(editing.id, { title: candidate.title, artist: candidate.artist, album: candidate.album }); setTracks((current) => current.map((track) => track.id === updated.id ? updated : track)); setEditing(updated); setCandidate(null); };
+
+  return <div className="page-stack"><header className="page-header"><div><p className="eyebrow">Catálogo</p><h1>Canciones</h1><p>{loading ? 'Consultando catálogo…' : `${total.toLocaleString('es-ES')} canciones encontradas`}</p></div></header>
+    <section className="table-toolbar"><label className="search-field"><Icon name="search"/><span className="sr-only">Buscar canciones</span><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Buscar título, artista o álbum…"/></label><label className="select-field"><span className="sr-only">Ordenar</span><select value={sort} onChange={(event) => setSort(event.target.value)}><option value="title">Título A–Z</option><option value="artist">Artista</option><option value="album">Álbum</option><option value="confidence">Confianza</option><option value="year-desc">Año reciente</option></select></label></section>
+    <div className="filter-strip" aria-label="Filtros de canciones">{FILTERS.map(([id, label]) => <button key={id} className={filter === id ? 'active' : ''} onClick={() => setFilter(id)}>{label}</button>)}</div>
+    {selected.size > 0 && <div className="selection-bar"><strong>{selected.size} seleccionadas</strong><span>Las acciones solo afectarán esta selección visible.</span><button className="button ghost" onClick={() => setSelected(new Set())}>Limpiar</button></div>}
+    {error && <Notice tone="error">{error}</Notice>}
+    {!loading && !error && tracks.length === 0 ? <EmptyState icon="tracks" title="No hay canciones en esta vista">Analiza una carpeta o cambia los filtros. No añadimos filas de ejemplo.</EmptyState> : <div className="table-shell"><table><thead><tr><th className="check-cell"><input type="checkbox" aria-label="Seleccionar todas las canciones visibles" checked={tracks.length > 0 && selected.size === tracks.length} onChange={toggleAll}/></th><th>Título</th><th>Artista</th><th>Álbum</th><th>Año</th><th>Género</th><th>Pista</th><th>Formato</th><th>Calidad</th><th>Confianza</th><th>Fuente</th><th><span className="sr-only">Acciones</span></th></tr></thead><tbody>{tracks.map((track) => <tr key={track.id}><td className="check-cell"><input type="checkbox" aria-label={`Seleccionar ${track.title ?? track.originalTitle}`} checked={selected.has(track.id)} onChange={() => setSelected((current) => { const next = new Set(current); if (next.has(track.id)) next.delete(track.id); else next.add(track.id); return next; })}/></td><td><button className="track-title" onClick={() => setEditing(track)}><span>{track.title ?? track.originalTitle}</span><small>{track.title && track.title !== track.originalTitle ? `Original: ${track.originalTitle}` : track.status}</small></button></td><td>{track.artist ?? <span className="missing">Sin artista</span>}</td><td>{track.album ?? <span className="missing">Sin álbum</span>}</td><td>{track.year ?? '—'}</td><td>{track.genre ?? <span className="missing">—</span>}</td><td>{track.trackNumber ?? '—'}</td><td><span className="format-pill">{track.format}</span></td><td><span title={formatDuration(null)}>{track.quality ?? '—'}</span></td><td><ConfidenceBadge value={track.confidence}/></td><td><span className={`source source-${track.source ?? 'none'}`}>{sourceLabel(track.source)}</span></td><td><button className={`icon-button favorite ${track.favorite ? 'active' : ''}`} aria-label={track.favorite ? 'Quitar de favoritos' : 'Marcar como favorita'} onClick={() => void favorite(track)}><Icon name="heart" filled={track.favorite}/></button></td></tr>)}</tbody></table>{loading && <div className="table-loading">Cargando catálogo…</div>}</div>}
+    <Dialog open={Boolean(editing)} title="Editar metadatos" eyebrow="Decisión manual" onClose={() => setEditing(null)} actions={<><button className="button ghost" onClick={() => setEditing(null)}>Cancelar</button><button className="button primary" type="submit" form="track-form">Guardar cambios</button></>}>
+      {editing && <form id="track-form" className="form-grid" onSubmit={(event) => void save(event)}><label><span>Título</span><input name="title" defaultValue={editing.title ?? ''}/></label><label><span>Artista</span><input name="artist" defaultValue={editing.artist ?? ''}/></label><label><span>Álbum</span><input name="album" defaultValue={editing.album ?? ''}/></label><label><span>Género</span><input name="genre" defaultValue={editing.genre ?? ''}/></label><div className="evidence-box"><strong>Evidencia actual</strong><ConfidenceBadge value={editing.confidence}/><p>Fuente: {sourceLabel(editing.source)}. Los cambios manuales quedan registrados y no se presentan como verificados por un proveedor.</p><button className="button ghost" type="button" disabled={identifying} onClick={() => void identify()}>{identifying ? 'Consultando…' : 'Buscar candidato externo'}</button>{candidate?.status === 'candidate' && <div className="candidate-card"><strong>{candidate.title} · {candidate.artist}</strong><span>{candidate.album ?? 'Álbum no confirmado'} · {candidate.confidence}% · {sourceLabel(candidate.source ?? null)}</span><button className="button primary" type="button" onClick={() => void acceptCandidate()}>Aceptar candidato</button></div>}{candidate?.status === 'unidentified' && <p>No se encontró un candidato con evidencia suficiente.</p>}</div></form>}
+    </Dialog>
+  </div>;
+}
+
+function sourceLabel(source: Track['source']) { return ({ local: 'Tags locales', path: 'Ruta', musicbrainz: 'MusicBrainz', openai: 'OpenAI', manual: 'Manual' } as Record<string, string>)[source ?? ''] ?? 'Sin fuente'; }

@@ -1,0 +1,14 @@
+{
+  "generator": "ffmpeg sine 440Hz duration 0.2s; no user media",
+  "files": {
+    "test-alac.m4a": "c0a99f5551f451d1ee4eaf8f5e4554d1af565b2baea70cfff62fdfcdb83fd5ea",
+    "test.aac": "44259512b9cc28fc5058aa47424bfff1a75d43576e891f9e917d397cb83f8476",
+    "test.aiff": "a3294e2643c1183f317e877daf2160a0d72511c473d7229cee13b68e909ebd60",
+    "test.flac": "67308ad3307b7f543bbe4816f615e6c3a5f123238001010545dd17eee42f8642",
+    "test.m4a": "39d1c31aae7f1ed0220cec45c0f77867730681df1b77c386119f50dac0cf8c93",
+    "test.mp3": "9e4d949505fceddb4b37d48e51d7414729d9d6bd8076d1b5d251083c9faa679e",
+    "test.ogg": "a49fa3873927390a372db111bf87cbd1cf45a812ccb0748f9533d2237411279d",
+    "test.opus": "68792abbae2e2bf2b7c3278f319e01b8157b7888652c2cac8052c87e82722031",
+    "test.wav": "5d06d9ed7743f7fc4fa698bf660281f5bc65955bc6b53c7a010e8c083b8b4c40"
+  }
+}
