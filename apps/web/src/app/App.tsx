@@ -46,7 +46,7 @@ export function App() {
   const title = titleMap[settings.language][view];
   const resetState = () => { setRoots([]); setStats(EMPTY_STATS); setScan(null); setPlan(null); applySettings(defaultSettings); setView('settings'); };
   let content;
-  if (view === 'library') content = <Dashboard stats={stats} roots={roots} scan={scan} onRootsChanged={loadRoots} onScanChanged={setScan} onNavigate={() => setView('tracks')}/>;
+  if (view === 'library') content = <Dashboard stats={stats} roots={roots} scan={scan} onRootsChanged={loadRoots} onScanChanged={setScan} onNavigate={() => setView('organization')}/>;
   else if (view === 'tracks') content = <TrackTable/>;
   else if (view === 'duplicates') content = <TrackTable initialFilter="duplicates"/>;
   else if (view === 'unidentified') content = <TrackTable initialFilter="review"/>;

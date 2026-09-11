@@ -39,7 +39,7 @@ export function Dashboard({ stats, roots, scan, onRootsChanged, onScanChanged, o
       await onRootsChanged();
       setBusy('scan');
       onScanChanged(await api.scan(selected.id));
-      setMessage({ tone: 'success', text: 'Biblioteca seleccionada y analizada. Los archivos originales permanecen intactos.' });
+      setMessage({ tone: 'success', text: 'Análisis iniciado. Mira el porcentaje de archivos leídos/procesados abajo; los originales permanecen intactos.' });
     }
     catch (error) { setMessage({ tone: 'error', text: error instanceof Error ? error.message : 'No se pudo seleccionar o analizar la carpeta' }); }
     finally { setBusy(null); }
@@ -65,6 +65,6 @@ export function Dashboard({ stats, roots, scan, onRootsChanged, onScanChanged, o
     {activeScan && <ScanProgress job={scan} onChanged={onScanChanged}/>} 
     {scan?.audit && <Notice tone="success">Revisión total: {scan.audit.audioFiles?.toLocaleString('es-ES')} audios, {formatBytes(scan.audit.audioBytes ?? stats.bytes)} leídos; {scan.audit.nonAudioFiles?.toLocaleString('es-ES')} archivos no-audio ignorados; {scan.errors} errores.</Notice>}
     <section className="stats-grid" aria-label="Estadísticas de biblioteca"><StatCard label="Audio detectado" value={stats.audioFiles.toLocaleString('es-ES')} note={formatBytes(stats.bytes)} accent/><StatCard label="Artistas" value={stats.artists.toLocaleString('es-ES')}/><StatCard label="Álbumes" value={stats.albums.toLocaleString('es-ES')}/><StatCard label="Géneros" value={stats.genres.toLocaleString('es-ES')}/><StatCard label="Completas" value={stats.complete.toLocaleString('es-ES')} note={`${stats.incomplete} por revisar`}/><StatCard label="Duplicados" value={stats.duplicates.toLocaleString('es-ES')}/><StatCard label="Sin identificar" value={stats.unidentified.toLocaleString('es-ES')}/><StatCard label="Errores" value={stats.errors.toLocaleString('es-ES')}/></section>
-    <section className="editorial-panel"><div><p className="eyebrow">Siguiente paso</p><h2>Revisa antes de organizar</h2><p>La confianza y la fuente aparecen en cada canción. Nada con evidencia insuficiente se incluye en silencio.</p></div><button className="text-link" onClick={onNavigate}>Abrir canciones <Icon name="arrow"/></button></section>
+    <section className="editorial-panel"><div><p className="eyebrow">Siguiente paso</p><h2>Revisa antes de organizar</h2><p>La confianza y la fuente aparecen en cada canción. Nada con evidencia insuficiente se incluye en silencio.</p></div><button className="text-link" onClick={onNavigate}>Ir a Ejecutar <Icon name="arrow"/></button></section>
   </div>;
 }

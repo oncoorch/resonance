@@ -33,6 +33,7 @@ const trackTarget = (track: any) => {
   return buildTargetRelativePath(track);
 };
 const foundAudit = (catalog: Catalog, rootId: string) => catalog.db.prepare('SELECT count(*) audioFiles,coalesce(sum(bytes),0) audioBytes FROM tracks WHERE root_id=? AND present=1').get(rootId);
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
   const app = Fastify({ logger: false, bodyLimit: 1024 * 1024 });
@@ -92,18 +93,40 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
   app.post('/api/scan', async (request, reply) => {
     const rootId = (request.body as Body)?.rootId; const root = grants.get(rootId);
     if (!root || root.role !== 'source') return reply.code(404).send({ error: 'SOURCE_ROOT_NOT_AUTHORIZED' });
-    const jobId = catalog.createJob(rootId); const found = await scanAudioFiles(root.path); let imported = 0; let errors = found.errors.length;
-    catalog.db.prepare('UPDATE tracks SET present=0 WHERE root_id=?').run(rootId);
-    for (const scanFile of found.files) {
-      try {
-        const metadata = await readTrackMetadata(scanFile.absolutePath);
-        const trackId = catalog.upsertTrack({ rootId, relativePath: scanFile.relativePath, originalPath: scanFile.absolutePath, originalFilename: path.basename(scanFile.absolutePath), bytes: scanFile.size, mtimeMs: scanFile.mtimeMs, ...metadata });
-        catalog.db.prepare('UPDATE tracks SET sha256=? WHERE id=?').run(await sha256File(scanFile.absolutePath), trackId); imported += 1;
-      } catch (error) { errors += 1; catalog.addError(jobId, scanFile.absolutePath, error instanceof Error ? error.message : String(error)); }
+    const jobId = catalog.createJob(rootId);
+    if (allowPathInput) {
+      const found = await scanAudioFiles(root.path); let imported = 0; let errors = found.errors.length;
+      catalog.db.prepare('UPDATE tracks SET present=0 WHERE root_id=?').run(rootId);
+      for (const scanFile of found.files) {
+        try { const metadata = await readTrackMetadata(scanFile.absolutePath); const trackId = catalog.upsertTrack({ rootId, relativePath: scanFile.relativePath, originalPath: scanFile.absolutePath, originalFilename: path.basename(scanFile.absolutePath), bytes: scanFile.size, mtimeMs: scanFile.mtimeMs, ...metadata }); catalog.db.prepare('UPDATE tracks SET sha256=? WHERE id=?').run(await sha256File(scanFile.absolutePath), trackId); imported += 1; }
+        catch (error) { errors += 1; catalog.addError(jobId, scanFile.absolutePath, error instanceof Error ? error.message : String(error)); }
+      }
+      for (const error of found.errors) catalog.addError(jobId, error.path, error.message);
+      catalog.db.prepare('UPDATE jobs SET discovered=?,processed=?,errors=?,status=?,finished_at=? WHERE id=?').run(found.files.length, imported + errors - found.errors.length, errors, 'completed', new Date().toISOString(), jobId);
+      return { jobId, discovered: found.files.length, imported, errors, audit: found.summary };
     }
-    for (const error of found.errors) catalog.addError(jobId, error.path, error.message);
-    catalog.finishJob(jobId, found.files.length, found.files.length, errors);
-    return { jobId, discovered: found.files.length, imported, errors, skippedLinks: found.skippedLinks, audit: found.summary };
+    void (async () => {
+      try {
+        const found = await scanAudioFiles(root.path); let imported = 0; let errors = found.errors.length;
+        catalog.db.prepare('UPDATE tracks SET present=0 WHERE root_id=?').run(rootId);
+        catalog.db.prepare('UPDATE jobs SET discovered=?,processed=0 WHERE id=?').run(found.files.length, jobId);
+        for (const scanFile of found.files) {
+          let state = (catalog.db.prepare('SELECT status FROM jobs WHERE id=?').get(jobId) as any)?.status;
+          while (state === 'paused') { await sleep(350); state = (catalog.db.prepare('SELECT status FROM jobs WHERE id=?').get(jobId) as any)?.status; }
+          if (state === 'cancelled') break;
+          try {
+            const metadata = await readTrackMetadata(scanFile.absolutePath);
+            const trackId = catalog.upsertTrack({ rootId, relativePath: scanFile.relativePath, originalPath: scanFile.absolutePath, originalFilename: path.basename(scanFile.absolutePath), bytes: scanFile.size, mtimeMs: scanFile.mtimeMs, ...metadata });
+            catalog.db.prepare('UPDATE tracks SET sha256=? WHERE id=?').run(await sha256File(scanFile.absolutePath), trackId); imported += 1;
+          } catch (error) { errors += 1; catalog.addError(jobId, scanFile.absolutePath, error instanceof Error ? error.message : String(error)); }
+          catalog.db.prepare('UPDATE jobs SET processed=?,errors=? WHERE id=?').run(imported + errors - found.errors.length, errors, jobId);
+        }
+        for (const error of found.errors) catalog.addError(jobId, error.path, error.message);
+        const finalState = (catalog.db.prepare('SELECT status FROM jobs WHERE id=?').get(jobId) as any)?.status === 'cancelled' ? 'cancelled' : 'completed';
+        catalog.db.prepare('UPDATE jobs SET status=?,errors=?,finished_at=? WHERE id=?').run(finalState, errors, new Date().toISOString(), jobId);
+      } catch (error) { catalog.db.prepare("UPDATE jobs SET status='failed',errors=errors+1,finished_at=? WHERE id=?").run(new Date().toISOString(), jobId); catalog.addError(jobId, root.path, error instanceof Error ? error.message : String(error)); }
+    })();
+    return { jobId, state: 'running', discovered: 0, processed: 0, errors: 0 };
   });
 
   app.get('/api/tracks', async (request) => {
@@ -149,7 +172,7 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
   });
   app.get('/api/scans/current', async () => {
     const row = catalog.db.prepare("SELECT * FROM jobs WHERE type='scan' ORDER BY created_at DESC LIMIT 1").get() as any;
-    return row ? { id: row.id, state: row.status, phase: row.status === 'completed' ? 'Finalizado' : 'Analizando', discovered: row.discovered, processed: row.processed, errors: row.errors } : null;
+    return row ? { id: row.id, state: row.status, phase: row.status === 'completed' ? 'Finalizado' : row.discovered ? 'Analizando metadatos' : 'Descubriendo archivos', discovered: row.discovered, processed: row.processed, errors: row.errors, audit: foundAudit(catalog, row.root_id) } : null;
   });
   app.post('/api/scans/:id/:action', async (request, reply) => {
     const { id, action } = request.params as Body; if (!['pause','resume','cancel'].includes(action)) return reply.code(400).send({ error: 'ACTION_INVALID' });
@@ -208,7 +231,7 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
       const manifest = JSON.stringify({ mode, conflicts, warnings, audit: foundAudit(catalog, source.id), rulesVersion: 2, generatedAt: now });
       catalog.db.transaction(() => { insertPlan.run(id, source.id, destination.id, mode, manifest, now); for (const item of items) insertItem.run(item.id,id,item.trackId,item.sourcePath,item.targetRelativePath,item.sourceSize,item.sourceMtimeMs,item.sourceHash,item.status); })();
     } catch (error) { return reply.code(400).send({ error: safeErrorCode(error, 'PLAN_PREVIEW_FAILED') }); }
-    return reply.code(201).send({ id, status: 'preview', revision: 1, mode, conflicts: items.filter((item) => item.status === 'conflict').length, warnings: items.filter((item) => item.status.startsWith('warning_')).length, items: items.map((item) => ({ id: item.id, trackId: item.trackId, sourcePath: catalog.track(item.trackId)?.relativePath, targetRelativePath: item.targetRelativePath, sourceSize: item.sourceSize, sourceMtimeMs: item.sourceMtimeMs, conflict: item.status === 'conflict', warning: item.status.startsWith('warning_') })) });
+    return reply.code(201).send({ id, status: 'preview', revision: 1, mode, conflicts: items.filter((item) => item.status === 'conflict').length, warnings: items.filter((item) => item.status.startsWith('warning_')).length, items: items.map((item) => ({ id: item.id, trackId: item.trackId, sourcePath: catalog.track(item.trackId)?.relativePath, targetRelativePath: item.targetRelativePath, sourceSize: item.sourceSize, sourceMtimeMs: item.sourceMtimeMs, status: item.status, conflict: item.status === 'conflict', warning: item.status.startsWith('warning_') })) });
   });
   app.post('/api/plans/:id/approve', async (request, reply) => {
     const id = (request.params as Body).id; const revision = Number((request.body as Body)?.revision);
@@ -218,7 +241,7 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
     const result = catalog.db.prepare("UPDATE organization_plans SET status='approved',revision=revision+1,approved_at=? WHERE id=? AND status='preview' AND revision=?").run(new Date().toISOString(), id, revision);
     if (!result.changes) return reply.code(409).send({ error: 'PLAN_NOT_APPROVABLE' });
     const items = catalog.db.prepare('SELECT * FROM plan_items WHERE plan_id=? ORDER BY rowid').all(id) as any[];
-    return { id, revision: revision + 1, status: 'approved', conflicts: 0, warnings: items.filter((row) => String(row.status).startsWith('warning_')).length, items: items.map((row) => ({ id: row.id, trackId: row.track_id, sourcePath: catalog.track(row.track_id)?.relativePath, targetRelativePath: row.target_relative_path, sourceSize: row.source_size, warning: String(row.status).startsWith('warning_') })) };
+    return { id, revision: revision + 1, status: 'approved', conflicts: 0, warnings: items.filter((row) => String(row.status).startsWith('warning_')).length, items: items.map((row) => ({ id: row.id, trackId: row.track_id, sourcePath: catalog.track(row.track_id)?.relativePath, targetRelativePath: row.target_relative_path, sourceSize: row.source_size, status: row.status, warning: String(row.status).startsWith('warning_') })) };
   });
   app.post('/api/plans/:id/apply', async (request, reply) => {
     const id = (request.params as Body).id; const plan: any = catalog.db.prepare('SELECT * FROM organization_plans WHERE id=?').get(id);
@@ -231,26 +254,30 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
     if (!hasSufficientSpace(requiredBytes, filesystem.bavail, filesystem.bsize)) return reply.code(507).send({ error: 'INSUFFICIENT_DESTINATION_SPACE', requiredBytes });
     const claimed = catalog.db.prepare("UPDATE organization_plans SET status='applying',revision=revision+1 WHERE id=? AND status='approved' AND revision=?").run(id,revision);
     if (!claimed.changes) return reply.code(409).send({ error: 'PLAN_ALREADY_CLAIMED' });
-    for (const item of items) {
-      const operationId = randomUUID(); let destinationPath: string; let sourcePath: string;
-      try {
-        const track = catalog.track(item.track_id); if (!track) throw new Error('TRACK_NOT_FOUND');
-        sourcePath = await grants.resolve(plan.source_root_id, track.relativePath); destinationPath = await grants.resolve(plan.destination_root_id, item.target_relative_path);
-        if (sourcePath !== item.source_path) throw new Error('SOURCE_CAPABILITY_MISMATCH');
-        catalog.db.prepare("INSERT INTO operations(id,plan_id,plan_item_id,source_path,destination_path,state,created_at) VALUES (?,?,?,?,?,'intent_durable',?)").run(operationId,id,item.id,sourcePath,destinationPath,new Date().toISOString());
-        const current = await stat(sourcePath); if (!sourceSnapshotMatches(current, { size: item.source_size, mtimeMs: item.source_mtime_ms }) || await sha256File(sourcePath) !== item.source_hash) throw Object.assign(new Error('SOURCE_CHANGED'), { code: 'SOURCE_CHANGED' });
-        const stop = catalog.db.prepare('SELECT status FROM organization_plans WHERE id=?').get(id) as any; if (stop?.status === 'cancel_requested') throw Object.assign(new Error('PLAN_CANCELLED'), { code: 'PLAN_CANCELLED' });
-        let verified: { sourceHash: string; targetHash: string; bytes: number };
-        if (item.status === 'warning_existing_verified') verified = { sourceHash: item.source_hash, targetHash: item.source_hash, bytes: item.source_size };
-        else verified = await copyVerifiedNoClobber(sourcePath, destinationPath);
-        copied += 1; catalog.setFinalPath(item.track_id, destinationPath);
-        catalog.db.prepare("UPDATE operations SET state='committed',source_hash=?,final_hash=?,bytes=?,finished_at=? WHERE id=?").run(verified.sourceHash,verified.targetHash,verified.bytes,new Date().toISOString(),operationId);
-        catalog.db.prepare("UPDATE plan_items SET status='committed' WHERE id=?").run(item.id); operations.push({ id: operationId, destination: item.target_relative_path, state: 'committed' });
-      } catch (error) { failed += 1; const operation = catalog.db.prepare('SELECT id FROM operations WHERE id=?').get(operationId); const code = safeErrorCode(error, 'OPERATION_FAILED'); if (operation) catalog.db.prepare("UPDATE operations SET state='failed',error=?,finished_at=? WHERE id=?").run(code,new Date().toISOString(),operationId); operations.push({ id: operationId, destination: item.target_relative_path, state: 'failed', error: code }); }
-    }
-    const cancelled = Number((catalog.db.prepare("SELECT count(*) count FROM operations WHERE plan_id=? AND error='PLAN_CANCELLED'").get(id) as any).count) > 0;
-    catalog.db.prepare('UPDATE organization_plans SET status=? WHERE id=?').run(cancelled ? 'cancelled' : failed ? 'failed' : 'applied', id);
-    return { jobId: id, revision: revision + 1, copied, failed, operations };
+    const runApply = async () => {
+      for (const item of items) {
+        const stop = catalog.db.prepare('SELECT status FROM organization_plans WHERE id=?').get(id) as any; if (stop?.status === 'cancel_requested') { catalog.db.prepare("UPDATE organization_plans SET status='cancelled' WHERE id=?").run(id); return; }
+        const operationId = randomUUID(); let destinationPath: string; let sourcePath: string;
+        try {
+          const track = catalog.track(item.track_id); if (!track) throw new Error('TRACK_NOT_FOUND');
+          sourcePath = await grants.resolve(plan.source_root_id, track.relativePath); destinationPath = await grants.resolve(plan.destination_root_id, item.target_relative_path);
+          if (sourcePath !== item.source_path) throw new Error('SOURCE_CAPABILITY_MISMATCH');
+          catalog.db.prepare("INSERT INTO operations(id,plan_id,plan_item_id,source_path,destination_path,state,created_at) VALUES (?,?,?,?,?,'intent_durable',?)").run(operationId,id,item.id,sourcePath,destinationPath,new Date().toISOString());
+          const current = await stat(sourcePath); if (!sourceSnapshotMatches(current, { size: item.source_size, mtimeMs: item.source_mtime_ms }) || await sha256File(sourcePath) !== item.source_hash) throw Object.assign(new Error('SOURCE_CHANGED'), { code: 'SOURCE_CHANGED' });
+          let verified: { sourceHash: string; targetHash: string; bytes: number };
+          if (item.status === 'warning_existing_verified') verified = { sourceHash: item.source_hash, targetHash: item.source_hash, bytes: item.source_size };
+          else verified = await copyVerifiedNoClobber(sourcePath, destinationPath);
+          copied += 1; catalog.setFinalPath(item.track_id, destinationPath);
+          catalog.db.prepare("UPDATE operations SET state='committed',source_hash=?,final_hash=?,bytes=?,finished_at=? WHERE id=?").run(verified.sourceHash,verified.targetHash,verified.bytes,new Date().toISOString(),operationId);
+          catalog.db.prepare("UPDATE plan_items SET status='committed' WHERE id=?").run(item.id); operations.push({ id: operationId, destination: item.target_relative_path, state: 'committed' });
+        } catch (error) { failed += 1; const operation = catalog.db.prepare('SELECT id FROM operations WHERE id=?').get(operationId); const code = safeErrorCode(error, 'OPERATION_FAILED'); if (operation) catalog.db.prepare("UPDATE operations SET state='failed',error=?,finished_at=? WHERE id=?").run(code,new Date().toISOString(),operationId); catalog.db.prepare("UPDATE plan_items SET status='failed' WHERE id=?").run(item.id); operations.push({ id: operationId, destination: item.target_relative_path, state: 'failed', error: code }); }
+      }
+      const cancelled = Number((catalog.db.prepare("SELECT count(*) count FROM operations WHERE plan_id=? AND error='PLAN_CANCELLED'").get(id) as any).count) > 0;
+      catalog.db.prepare('UPDATE organization_plans SET status=? WHERE id=?').run(cancelled ? 'cancelled' : failed ? 'failed' : 'applied', id);
+    };
+    if (allowPathInput) { await runApply(); return { jobId: id, revision: revision + 1, copied, failed, operations }; }
+    setImmediate(() => { void runApply(); });
+    return reply.code(202).send({ jobId: id, revision: revision + 1, state: 'applying' });
   });
   app.post('/api/plans/:id/cancel', async (request, reply) => {
     const id = (request.params as Body).id;
@@ -279,7 +306,7 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
     const plan = catalog.db.prepare('SELECT * FROM organization_plans ORDER BY created_at DESC LIMIT 1').get() as any; if (!plan) return null;
     const rows = catalog.db.prepare('SELECT * FROM plan_items WHERE plan_id=? ORDER BY rowid').all(plan.id) as any[];
     const manifest = JSON.parse(plan.manifest_json || '{}');
-    return { id: plan.id, revision: plan.revision, status: plan.status, mode: plan.mode, conflicts: rows.filter((row) => row.status === 'conflict').length, warnings: rows.filter((row) => String(row.status).startsWith('warning_')).length, audit: manifest.audit, items: rows.map((row) => ({ id: row.id, trackId: row.track_id, sourcePath: catalog.track(row.track_id)?.relativePath, targetRelativePath: row.target_relative_path, sourceSize: row.source_size, conflict: row.status === 'conflict', warning: String(row.status).startsWith('warning_') })) };
+    return { id: plan.id, revision: plan.revision, status: plan.status, mode: plan.mode, conflicts: rows.filter((row) => row.status === 'conflict').length, warnings: rows.filter((row) => String(row.status).startsWith('warning_')).length, audit: manifest.audit, items: rows.map((row) => ({ id: row.id, trackId: row.track_id, sourcePath: catalog.track(row.track_id)?.relativePath, targetRelativePath: row.target_relative_path, sourceSize: row.source_size, status: row.status, conflict: row.status === 'conflict', warning: String(row.status).startsWith('warning_') })) };
   });
 
   const organizerVerified = () => Number((catalog.db.prepare("SELECT count(*) count FROM organization_plans WHERE status='applied'").get() as any).count) > 0;

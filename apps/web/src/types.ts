@@ -14,7 +14,7 @@ export interface Track {
 }
 export interface ScanAudit { directories?: number; entries?: number; audioFiles?: number; nonAudioFiles?: number; audioBytes?: number; totalBytes?: number }
 export interface ScanJob { id: string; state: 'queued' | 'running' | 'paused' | 'cancel_requested' | 'cancelled' | 'completed' | 'failed'; phase?: string; discovered: number; processed: number; errors: number; audit?: ScanAudit }
-export interface PlanItem { id: string; trackId: string; originalPath: string; destinationPath: string; selected: boolean; conflict?: string | null; warning?: string | null; tagChanges?: Array<{ field: string; from: string | null; to: string | null }> }
+export interface PlanItem { id: string; trackId: string; originalPath: string; destinationPath: string; selected: boolean; state?: string; conflict?: string | null; warning?: string | null; tagChanges?: Array<{ field: string; from: string | null; to: string | null }> }
 export interface Plan { id: string; revision: number; state: 'draft' | 'approved' | 'applying' | 'completed' | 'stale' | 'cancel_requested' | 'cancelled'; mode: Mode; items: PlanItem[]; estimatedBytes: number; excluded: number; conflicts: number; warnings?: number; audit?: ScanAudit }
 export interface ProviderSettings { musicbrainzEnabled: boolean; openaiEnabled: boolean; webSearchEnabled: boolean; openaiConfigured: boolean; model: string | null; maxRequests: number; maxWebRequests: number }
 export type Language = 'es' | 'en';
