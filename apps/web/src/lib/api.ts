@@ -1,4 +1,4 @@
-import type { AppSettings, HistoryEntry, Plan, Playlist, RootGrant, ScanJob, Stats, Track } from '../types';
+import type { AppSettings, HistoryEntry, Plan, PlanBuildJob, Playlist, RootGrant, ScanJob, Stats, Track } from '../types';
 
 export class ApiError extends Error { constructor(public status: number, message: string) { super(message); } }
 let csrfToken = '';
@@ -36,7 +36,10 @@ export const api = {
   currentScan: () => request<ScanJob | null>('/scans/current'),
   scanAction: (id: string, action: 'pause' | 'resume' | 'cancel') => mutate<ScanJob>(`/scans/${encodeURIComponent(id)}/${action}`, 'POST'),
   plan: async () => { const raw = await request<any | null>('/plans/current'); return raw ? mapPlan(raw, raw.mode ?? 'safe') : null; },
-  createPlan: async (destinationRootId: string, mode: AppSettings['mode']) => { const roots = await api.roots(); const source = roots.roots.find((root) => root.role === 'source'); if (!source) throw new Error('Autoriza primero una carpeta de origen'); const raw = await mutate<any>('/plans/preview', 'POST', { sourceRootId: source.id, destinationRootId, all: true, mode }); return mapPlan(raw, mode); },
+  createPlan: async (destinationRootId: string, mode: AppSettings['mode']) => { const roots = await api.roots(); const source = roots.roots.find((root) => root.role === 'source'); if (!source) throw new Error('Elige una carpeta de origen en esta pantalla antes de ejecutar'); const raw = await mutate<any>('/plans/preview', 'POST', { sourceRootId: source.id, destinationRootId, all: true, mode }); return mapPlan(raw, mode); },
+  startPlanBuild: async (destinationRootId: string, mode: AppSettings['mode']) => { const roots = await api.roots(); const source = roots.roots.find((root) => root.role === 'source'); if (!source) throw new Error('Elige una carpeta de origen en esta pantalla antes de ejecutar'); return mutate<{ jobId: string }>('/plans/preview-jobs', 'POST', { sourceRootId: source.id, destinationRootId, all: true, mode }); },
+  planBuild: async (id: string): Promise<PlanBuildJob> => { const raw = await request<any>(`/plans/preview-jobs/${encodeURIComponent(id)}`); return { ...raw, plan: raw.plan ? mapPlan(raw.plan, raw.plan.mode ?? 'safe') : undefined }; },
+  cancelPlanBuild: (id: string) => mutate<{ id: string; state: string }>(`/plans/preview-jobs/${encodeURIComponent(id)}/cancel`, 'POST'),
   approvePlan: async (id: string, revision: number, mode: AppSettings['mode']) => mapPlan(await mutate<any>(`/plans/${encodeURIComponent(id)}/approve`, 'POST', { revision, mode }), mode),
   applyPlan: (id: string, revision: number) => mutate<{ jobId: string }>(`/plans/${encodeURIComponent(id)}/apply`, 'POST', { revision }),
   cancelPlan: (id: string) => mutate<{ id: string; status: string }>(`/plans/${encodeURIComponent(id)}/cancel`, 'POST'),

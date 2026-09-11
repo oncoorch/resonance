@@ -42,6 +42,7 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
   const grants = new RootGrants();
   const sessions = new Map<string, string>();
   let runtimeOpenAIKey = process.env.OPENAI_API_KEY?.trim() ?? '';
+  const planBuildJobs = new Map<string, { id: string; state: 'queued' | 'running' | 'completed' | 'cancelled' | 'failed'; phase: string; processed: number; total: number; current?: string; conflicts?: number; warnings?: number; error?: string; plan?: any }>();
 
   const origins = new Set(options.allowedOrigins ?? ['http://127.0.0.1:4173', 'http://127.0.0.1:4174', 'http://127.0.0.1:5173', 'http://resonance.local:4888']);
   const hosts = new Set(options.allowedHosts ?? ['127.0.0.1:4174', 'localhost:4174', '127.0.0.1:4888', 'localhost:4888', 'resonance.local:4888']);
@@ -233,6 +234,38 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
     } catch (error) { return reply.code(400).send({ error: safeErrorCode(error, 'PLAN_PREVIEW_FAILED') }); }
     return reply.code(201).send({ id, status: 'preview', revision: 1, mode, conflicts: items.filter((item) => item.status === 'conflict').length, warnings: items.filter((item) => item.status.startsWith('warning_')).length, items: items.map((item) => ({ id: item.id, trackId: item.trackId, sourcePath: catalog.track(item.trackId)?.relativePath, targetRelativePath: item.targetRelativePath, sourceSize: item.sourceSize, sourceMtimeMs: item.sourceMtimeMs, status: item.status, conflict: item.status === 'conflict', warning: item.status.startsWith('warning_') })) });
   });
+  app.post('/api/plans/preview-jobs', async (request, reply) => {
+    const body = request.body as Body; const source = grants.get(body.sourceRootId); const destination = grants.get(body.destinationRootId);
+    if (!source || source.role !== 'source' || !destination || destination.role !== 'destination') return reply.code(400).send({ error: 'ROOTS_INVALID' });
+    const mode = body.mode; if (!['simulation', 'safe'].includes(mode)) return reply.code(400).send({ error: 'PLAN_MODE_INVALID' });
+    const trackIds = body.all === true ? (catalog.db.prepare('SELECT id FROM tracks WHERE root_id=? AND present=1 ORDER BY relative_path').all(source.id) as Array<{ id: string }>).map((row) => row.id) : Array.isArray(body.trackIds) ? [...new Set(body.trackIds.filter((id): id is string => typeof id === 'string'))] : [];
+    if (!trackIds.length) return reply.code(400).send({ error: 'TRACKS_REQUIRED' });
+    const jobId = randomUUID(); const job = { id: jobId, state: 'queued' as const, phase: 'Preparando revisión', processed: 0, total: trackIds.length, conflicts: 0, warnings: 0 };
+    planBuildJobs.set(jobId, job);
+    setImmediate(async () => {
+      const current = planBuildJobs.get(jobId); if (!current) return; current.state = 'running'; current.phase = 'Leyendo canciones y calculando nombres finales';
+      const id = randomUUID(); const now = new Date().toISOString(); const insertPlan = catalog.db.prepare("INSERT INTO organization_plans(id,source_root_id,destination_root_id,status,mode,manifest_json,created_at) VALUES (?,?,?,'preview',?,?,?)"); const insertItem = catalog.db.prepare('INSERT INTO plan_items(id,plan_id,track_id,source_path,target_relative_path,source_size,source_mtime_ms,source_hash,status) VALUES (?,?,?,?,?,?,?,?,?)'); const items: any[] = [];
+      try {
+        for (const trackId of trackIds) {
+          if ((current as any).state === 'cancelled') return;
+          const track = catalog.track(trackId); if (!track || track.rootId !== source.id) throw new Error('TRACK_OUTSIDE_SOURCE');
+          current.current = track.relativePath; current.phase = 'Calculando destino y verificando conflictos';
+          const targetRelativePath = trackTarget(track); current.phase = 'Calculando huella del archivo original'; const sourceHash = await sha256File(track.originalPath);
+          const item = { id: randomUUID(), trackId, sourcePath: track.originalPath, targetRelativePath, sourceSize: track.bytes, sourceMtimeMs: track.mtimeMs, sourceHash, status: 'planned' };
+          try { const existing = await lstat(path.join(destination.path, targetRelativePath)); if (existing.isFile() && existing.size === track.bytes && await sha256File(path.join(destination.path, targetRelativePath)) === sourceHash) item.status = 'warning_existing_verified'; else item.status = 'conflict'; } catch (error: any) { if (error.code !== 'ENOENT') throw error; }
+          items.push(item); current.processed += 1; current.conflicts = items.filter((row) => row.status === 'conflict').length; current.warnings = items.filter((row) => String(row.status).startsWith('warning_')).length;
+        }
+        current.phase = 'Revisando nombres duplicados internos'; const targetCounts = new Map<string, number>(); for (const item of items) { const key = item.targetRelativePath.normalize('NFC').toLocaleLowerCase(); targetCounts.set(key, (targetCounts.get(key) ?? 0) + 1); } for (const item of items) if ((targetCounts.get(item.targetRelativePath.normalize('NFC').toLocaleLowerCase()) ?? 0) > 1) item.status = 'conflict';
+        const conflicts = items.filter((item) => item.status === 'conflict').length; const warnings = items.filter((item) => item.status.startsWith('warning_')).length; const audit = foundAudit(catalog, source.id); const manifest = JSON.stringify({ mode, conflicts, warnings, audit, rulesVersion: 2, generatedAt: now });
+        catalog.db.transaction(() => { insertPlan.run(id, source.id, destination.id, mode, manifest, now); for (const item of items) insertItem.run(item.id,id,item.trackId,item.sourcePath,item.targetRelativePath,item.sourceSize,item.sourceMtimeMs,item.sourceHash,item.status); })();
+        current.state = 'completed'; current.phase = 'Revisión lista para aprobar'; current.conflicts = conflicts; current.warnings = warnings; current.plan = { id, status: 'preview', revision: 1, mode, conflicts, warnings, audit, items: items.map((item) => ({ id: item.id, trackId: item.trackId, sourcePath: catalog.track(item.trackId)?.relativePath, targetRelativePath: item.targetRelativePath, sourceSize: item.sourceSize, sourceMtimeMs: item.sourceMtimeMs, status: item.status, conflict: item.status === 'conflict', warning: item.status.startsWith('warning_') })) };
+      } catch (error) { current.state = 'failed'; current.phase = 'La revisión falló'; current.error = safeErrorCode(error, 'PLAN_PREVIEW_FAILED'); }
+    });
+    return reply.code(202).send({ jobId });
+  });
+  app.get('/api/plans/preview-jobs/:id', async (request, reply) => { const job = planBuildJobs.get((request.params as Body).id); if (!job) return reply.code(404).send({ error: 'JOB_NOT_FOUND' }); return job; });
+  app.post('/api/plans/preview-jobs/:id/cancel', async (request, reply) => { const job = planBuildJobs.get((request.params as Body).id); if (!job) return reply.code(404).send({ error: 'JOB_NOT_FOUND' }); if (job.state === 'running' || job.state === 'queued') job.state = 'cancelled'; return { id: job.id, state: job.state }; });
+
   app.post('/api/plans/:id/approve', async (request, reply) => {
     const id = (request.params as Body).id; const revision = Number((request.body as Body)?.revision);
     if (!Number.isInteger(revision)) return reply.code(400).send({ error: 'PLAN_REVISION_REQUIRED' });
