@@ -3,7 +3,7 @@ import { Icon } from '../../components/Icon';
 import { Dialog, EmptyState, Notice } from '../../components/Primitives';
 import { api } from '../../lib/api';
 import { formatBytes } from '../../lib/library';
-import type { Mode, Plan, PlanBuildJob, RootGrant } from '../../types';
+import type { Mode, Plan, PlanBuildJob, RootGrant, ConflictSolution } from '../../types';
 
 type WorkOption = 'copy' | 'metadata' | 'duplicates' | 'playlists' | 'tags';
 const OPTIONS: Array<{ id: WorkOption; label: string; description: string; disabled?: boolean }> = [
@@ -19,8 +19,10 @@ function PercentCard({ label, done, total }: { label: string; done: number; tota
   return <article className="progress-card compact-progress"><div className="progress-head"><div><p className="eyebrow">{label}</p><h2>{total ? `${done.toLocaleString('es-ES')} / ${total.toLocaleString('es-ES')}` : 'Pendiente'}</h2></div><strong>{percent}%</strong></div><div className={`progress-track ${total ? '' : 'indeterminate'}`}><i style={total ? { width: `${percent}%` } : undefined}/></div></article>;
 }
 
-export function PlanPreview({ plan, roots, mode, onPlanChanged }: { plan: Plan | null; roots: RootGrant[]; mode: Mode; onPlanChanged: (plan: Plan) => void }) {
-  const [dialog, setDialog] = useState<'approve' | 'apply' | null>(null); const [busy, setBusy] = useState(false); const [error, setError] = useState<string | null>(null); const [buildJob, setBuildJob] = useState<PlanBuildJob | null>(null);
+export function PlanPreview({ plan, roots, mode, settings, onPlanChanged }: { plan: Plan | null; roots: RootGrant[]; mode: Mode; settings: any; onPlanChanged: (plan: Plan) => void }) {
+  const [dialog, setDialog] = useState<'approve' | 'apply' | 'conflict' | null>(null);
+  const [selectedConflictSolution, setSelectedConflictSolution] = useState<ConflictSolution | null>(null);
+  const [conflictAction, setConflictAction] = useState<'replace' | 'version' | 'keep_both' | null>(null); const [busy, setBusy] = useState(false); const [error, setError] = useState<string | null>(null); const [buildJob, setBuildJob] = useState<PlanBuildJob | null>(null);
   const [options, setOptions] = useState<Record<WorkOption, boolean>>({ copy: true, metadata: true, duplicates: true, playlists: false, tags: false });
   const source = roots.find((root) => root.role === 'source'); const destination = roots.find((root) => root.role === 'destination');
   const approvalBlockReason = plan?.state === 'stale' ? 'La revisión está desactualizada. Ejecuta una nueva revisión.' : null;
@@ -39,8 +41,45 @@ export function PlanPreview({ plan, roots, mode, onPlanChanged }: { plan: Plan |
   const execute = async () => { if (!source || !destination) { setError('Primero elige origen y destino.'); return; } setBusy(true); setError(null); setBuildJob({ id: 'starting', state: 'queued', phase: 'Iniciando revisión', processed: 0, total: 0 }); try { const started = await api.startPlanBuild(destination.id, mode); setBuildJob({ id: started.jobId, state: 'queued', phase: 'Preparando revisión', processed: 0, total: 0 }); } catch (reason) { setError(reason instanceof Error ? reason.message : 'No se pudo iniciar la revisión'); setBuildJob(null); setBusy(false); } };
   const cancelBuild = async () => { if (!buildJob || buildJob.id === 'starting') return; setBusy(true); try { await api.cancelPlanBuild(buildJob.id); setBuildJob({ ...buildJob, state: 'cancelled', phase: 'Revisión cancelada' }); } catch (reason) { setError(reason instanceof Error ? reason.message : 'No se pudo cancelar la revisión'); } finally { setBusy(false); } };
   const approve = async () => { if (!plan) return; setBusy(true); try { onPlanChanged(await api.approvePlan(plan.id, plan.revision, mode)); setDialog(null); } catch (reason) { setError(reason instanceof Error ? reason.message : 'El plan no pudo aprobarse'); } finally { setBusy(false); } };
-  const apply = async () => { if (!plan) return; setBusy(true); try { await api.applyPlan(plan.id, plan.revision); setDialog(null); onPlanChanged({ ...plan, state: 'applying' }); } catch (reason) { setError(reason instanceof Error ? reason.message : 'No se pudo aplicar el plan'); } finally { setBusy(false); } };
+  const apply = async () => {
+    if (!plan) return;
+    setBusy(true);
+    try {
+      await api.applyPlan(plan.id, plan.revision);
+      setDialog(null);
+      onPlanChanged({ ...plan, state: 'applying' });
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : 'No se pudo aplicar el plan');
+    } finally {
+      setBusy(false);
+    }
+  };
+  const canApply = () => plan?.state === 'approved' && mode === 'safe';
+  const openApplyDialog = () => {
+    if (!canApply()) {
+      if (mode !== 'safe') setError('Cambia el modo a "safe" en Configuración para poder aplicar cambios.');
+      else setError('La revisión debe estar aprobada antes de aplicar.');
+      return;
+    }
+    setDialog('apply');
+  };
   const stop = async () => { if (!plan) return; setBusy(true); try { await api.cancelPlan(plan.id); onPlanChanged({ ...plan, state: 'cancel_requested' }); } catch (reason) { setError(reason instanceof Error ? reason.message : 'No se pudo detener'); } finally { setBusy(false); } };
+  const resolveConflict = async () => {
+    if (!selectedConflictSolution || !conflictAction || !plan) return;
+    setBusy(true);
+    try {
+      // Esta función aplicaría la solución seleccionada al conflicto.
+      // Por ahora, simplemente marca el item como resuelto y permite al usuario decidir.
+      await api.patchTrack(selectedConflictSolution.trackId, { title: selectedConflictSolution.suggestedAction === 'replace' ? 'Reemplazado' : conflictAction === 'version' ? 'Versionado' : 'Conservado' });
+      setSelectedConflictSolution(null);
+      setConflictAction(null);
+      setDialog(null);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : 'No se pudo resolver el conflicto');
+    } finally {
+      setBusy(false);
+    }
+  };
 
   return <div className="page-stack"><header className="page-header"><div><p className="eyebrow">Centro de ejecución</p><h1>Ejecutar RESONANCE</h1><p>El flujo completo está aquí: elegir carpetas, revisar opciones, ejecutar revisión, aprobar y aplicar.</p></div>{plan && <span className="revision">Revisión {plan.revision}</span>}</header>
     <section className="execution-map"><article><span>1</span><strong>Carpetas</strong><p>Origen: {source?.path ?? 'pendiente'} · Destino: {destination?.path ?? 'pendiente'}</p><div className="button-row"><button className="button secondary" onClick={() => void authorize('source')} disabled={busy}><Icon name="folder"/>Origen</button><button className="button secondary" onClick={() => void authorize('destination')} disabled={busy}><Icon name="folder"/>Destino</button></div></article><article><span>2</span><strong>Qué procesar</strong><p>Selecciona los cambios que RESONANCE debe preparar.</p></article><article><span>3</span><strong>Revisión</strong><p>Calcula rutas, conflictos, tamaño y metadatos. No escribe.</p></article><article><span>4</span><strong>Aplicación</strong><p>Copia, verifica y muestra progreso. STOP corta antes del siguiente archivo.</p></article></section>
@@ -58,9 +97,12 @@ export function PlanPreview({ plan, roots, mode, onPlanChanged }: { plan: Plan |
       {approvalBlockReason && <Notice tone="warning">No puedes aprobar todavía: {approvalBlockReason}</Notice>}
       {plan.conflicts > 0 && <Notice tone="warning">{plan.conflicts.toLocaleString('es-ES')} elementos quedan para revisión, pero NO bloquean la aprobación ni la ejecución. RESONANCE aplicará todo lo seguro y dejará esos casos para decidir: reemplazar si metadatos/duración coinciden, conservar como versión si son distintos, o ignorar.</Notice>}
       <section className="plan-list" aria-label="Cambios propuestos">{plan.items.slice(0, 120).map((item) => <article className={item.conflict ? 'has-conflict' : item.warning ? 'has-warning' : item.state === 'committed' ? 'has-success' : ''} key={item.id}><div className="path-flow"><span><b>ORIGINAL</b><code>{item.originalPath}</code></span><i aria-hidden="true">↓</i><span><b>DESTINO</b><code>{item.destinationPath}</code></span></div>{item.state && <div className="conflict warning"><Icon name="check"/>Estado: {item.state}</div>}{item.conflict && <div className="conflict"><Icon name="warning"/>{item.conflict}</div>}{item.warning && <div className="conflict warning"><Icon name="check"/>{item.warning}</div>}</article>)}</section>
-      <footer className="sticky-actions"><div><strong>{approvalBlockReason ?? (plan.state === 'approved' ? 'Revisión aprobada: pulsa APLICAR Y EJECUTAR' : plan.state === 'applying' ? 'Ejecutando cambios verificados' : 'Aprobar no ejecuta cambios')}</strong><p>{approvalBlockReason ? 'El botón está desactivado hasta resolver esa causa.' : plan.conflicts ? 'Los casos conflictivos quedan separados; lo seguro se puede ejecutar ahora.' : 'El botón principal para hacer el trabajo está aquí abajo.'}</p></div>{plan.state === 'applying' || plan.state === 'cancel_requested' ? <button className="button danger" onClick={() => void stop()} disabled={busy || plan.state === 'cancel_requested'}><Icon name="stop"/>STOP</button> : plan.state === 'approved' ? <button className="button primary" onClick={() => setDialog('apply')}>APLICAR Y EJECUTAR</button> : <button className="button primary" disabled={Boolean(approvalBlockReason)} title={approvalBlockReason ?? undefined} onClick={() => setDialog('approve')}>REVISAR Y APROBAR</button>}</footer>
+      <footer className="sticky-actions"><div><strong>{approvalBlockReason ?? (plan.state === 'approved' ? 'Revisión aprobada: pulsa APLICAR Y EJECUTAR' : plan.state === 'applying' ? 'Ejecutando cambios verificados' : 'Aprobar no ejecuta cambios')}</strong><p>{approvalBlockReason ? 'El botón está desactivado hasta resolver esa causa.' : plan.conflicts ? 'Los casos conflictivos quedan separados; lo seguro se puede ejecutar ahora.' : 'El botón principal para hacer el trabajo está aquí abajo.'}</p></div>{plan.state === 'applying' || plan.state === 'cancel_requested' ? <button className="button danger" onClick={() => void stop()} disabled={busy || plan.state === 'cancel_requested'}><Icon name="stop"/>STOP</button> : plan.state === 'approved' ? <button className="button primary" onClick={() => void openApplyDialog()}>APLICAR Y EJECUTAR</button> : <button className="button primary" disabled={Boolean(approvalBlockReason)} title={approvalBlockReason ?? undefined} onClick={() => setDialog('approve')}>REVISAR Y APROBAR</button>}</footer>
     </>}
     <Dialog open={dialog === 'approve'} title="Aprobar esta revisión" eyebrow="Confirmación 1 de 2" onClose={() => setDialog(null)} actions={<><button className="button ghost" onClick={() => setDialog(null)}>Volver</button><button className="button primary" onClick={() => void approve()} disabled={busy}>Solo aprobar</button></>}><p>Esto congela la lista. Todavía NO copia archivos.</p></Dialog>
-    <Dialog open={dialog === 'apply'} danger title="Aplicar y ejecutar" eyebrow="Confirmación final" onClose={() => setDialog(null)} actions={<><button className="button ghost" onClick={() => setDialog(null)}>Cancelar</button><button className="button danger" onClick={() => void apply()} disabled={busy || mode === 'simulation'}>Sí, aplicar y ejecutar</button></>}><Notice tone="warning">Escribe solo en el destino autorizado. No borra originales ni sobrescribe archivos diferentes.</Notice><p>Se ejecutará la revisión {plan?.revision}. Verás porcentaje y puedes usar STOP.</p></Dialog>
+    <Dialog open={dialog === 'apply'} danger title="Aplicar y ejecutar" eyebrow="Confirmación final" onClose={() => setDialog(null)} actions={<><button className="button ghost" onClick={() => setDialog(null)}>Cancelar</button><button className="button danger" onClick={() => void apply()} disabled={busy}>Sí, aplicar y ejecutar</button></>}>
+      <Notice tone="warning">Escribe solo en el destino autorizado. No borra originales ni sobrescribe archivos diferentes.</Notice>
+      <p>Se ejecutará la revisión {plan?.revision}. Verás porcentaje y puedes usar STOP.</p>
+    </Dialog>
   </div>;
 }

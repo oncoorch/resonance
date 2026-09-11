@@ -1,5 +1,5 @@
 export type ViewId = 'library' | 'tracks' | 'artists' | 'albums' | 'genres' | 'duplicates' | 'unidentified' | 'playlists' | 'history' | 'settings' | 'organization';
-export type Mode = 'simulation' | 'safe' | 'organize';
+export type Mode = 'safe' | 'organize';
 
 export interface RootGrant { id: string; path: string; role: 'source' | 'destination'; authorized?: boolean }
 export interface Stats {
@@ -16,7 +16,17 @@ export interface Track {
 export interface ScanAudit { directories?: number; entries?: number; audioFiles?: number; nonAudioFiles?: number; audioBytes?: number; totalBytes?: number }
 export interface ScanJob { id: string; state: 'queued' | 'running' | 'paused' | 'cancel_requested' | 'cancelled' | 'completed' | 'failed'; phase?: string; discovered: number; processed: number; errors: number; audit?: ScanAudit }
 export interface PlanItem { id: string; trackId: string; originalPath: string; destinationPath: string; selected: boolean; state?: string; conflict?: string | null; warning?: string | null; tagChanges?: Array<{ field: string; from: string | null; to: string | null }> }
-export interface Plan { id: string; revision: number; state: 'draft' | 'approved' | 'applying' | 'completed' | 'stale' | 'cancel_requested' | 'cancelled'; mode: Mode; items: PlanItem[]; estimatedBytes: number; excluded: number; conflicts: number; warnings?: number; executable?: number; skipped?: number; audit?: ScanAudit; space?: { requiredBytes: number; availableBytes: number; sufficientForCopy: boolean; sameVolume: boolean; suggestedStrategy: 'copy' | 'move-same-disk' | 'free-space' } }
+export interface ConflictSolution {
+  itemId: string;
+  trackId: string;
+  targetRelativePath: string;
+  conflictType: 'same_recording' | 'different_recording' | 'same_track_different_album';
+  suggestedAction: 'replace' | 'version' | 'keep_both' | 'review';
+  reason: string;
+  metadataMatch: boolean;
+  durationMatch: boolean | null;
+}
+export interface Plan { id: string; revision: number; state: 'draft' | 'approved' | 'applying' | 'completed' | 'stale' | 'cancel_requested' | 'cancelled'; mode: Mode; items: PlanItem[]; estimatedBytes: number; excluded: number; conflicts: number; warnings?: number; executable?: number; skipped?: number; audit?: ScanAudit; space?: { requiredBytes: number; availableBytes: number; sufficientForCopy: boolean; sameVolume: boolean; suggestedStrategy: 'copy' | 'move-same-disk' | 'free-space' }; conflictSolutions?: ConflictSolution[] }
 export interface PlanBuildJob { id: string; state: 'queued' | 'running' | 'completed' | 'cancelled' | 'failed'; phase: string; processed: number; total: number; current?: string; conflicts?: number; warnings?: number; error?: string; plan?: Plan }
 export interface ProviderSettings { musicbrainzEnabled: boolean; openaiEnabled: boolean; webSearchEnabled: boolean; openaiConfigured: boolean; model: string | null; maxRequests: number; maxWebRequests: number }
 export type Language = 'es' | 'en';

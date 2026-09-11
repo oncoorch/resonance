@@ -2,8 +2,10 @@ import Fastify, { type FastifyInstance } from 'fastify';
 import cookie from '@fastify/cookie';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { createReadStream } from 'node:fs';
+import { createReadStream, readFileSync, statSync } from 'node:fs';
 import { lstat, stat, statfs } from 'node:fs/promises';
 import path from 'node:path';
+  const parseStream = (source: any, filePath: string, options: any): Promise<any> => import('music-metadata').then(m => m.parseStream(source, filePath, options));
 import { Catalog } from './db/catalog.js';
 import { RootGrants, type RootRole } from './security/root-grants.js';
 import { scanAudioFiles } from './services/scanner.js';
@@ -52,14 +54,98 @@ const autoVersionInternalCollisions = (items: any[]) => {
     seen.set(key, next); seen.set(normalizeTargetKey(candidate), 1);
   }
 };
+const summarizePlanItemsSync = (items: any[]) => {
+  const conflicts = items.filter((item) => item.status === 'conflict').length;
+  const warnings = items.filter((item) => String(item.status).startsWith('warning_')).length;
+  const executable = items.filter((item) => item.status !== 'conflict').length;
+  const skipped = items.filter((item) => item.status === 'conflict').length;
+  const executableBytes = items.filter((item) => item.status !== 'conflict' && item.status !== 'warning_existing_verified').reduce((sum, item) => sum + Number(item.sourceSize ?? item.source_size ?? 0), 0);
+  return { conflicts, warnings, executable, skipped, executableBytes, conflictSolutions: items.filter((item) => item.status === 'conflict').map((item) => item.conflictSolution) };
+};
+
+const summarizePlanItemsAsync = async (items: any[]) => {
+  const conflicts = items.filter((item) => item.status === 'conflict').length;
+  const warnings = items.filter((item) => String(item.status).startsWith('warning_')).length;
+  const executable = items.filter((item) => item.status !== 'conflict').length;
+  const skipped = items.filter((item) => item.status === 'conflict').length;
+  const executableBytes = items.filter((item) => item.status !== 'conflict' && item.status !== 'warning_existing_verified').reduce((sum, item) => sum + Number(item.sourceSize ?? item.source_size ?? 0), 0);
+  const conflictSolutions = await Promise.all(items.filter((item) => item.status === 'conflict').map((item) => classifyConflictSolution(item)));
+  return { conflicts, warnings, executable, skipped, executableBytes, conflictSolutions };
+};
+
 const summarizePlanItems = (items: any[]) => {
   const conflicts = items.filter((item) => item.status === 'conflict').length;
   const warnings = items.filter((item) => String(item.status).startsWith('warning_')).length;
   const executable = items.filter((item) => item.status !== 'conflict').length;
   const skipped = items.filter((item) => item.status === 'conflict').length;
   const executableBytes = items.filter((item) => item.status !== 'conflict' && item.status !== 'warning_existing_verified').reduce((sum, item) => sum + Number(item.sourceSize ?? item.source_size ?? 0), 0);
-  return { conflicts, warnings, executable, skipped, executableBytes };
+  const conflictSolutions = items.filter((item) => item.status === 'conflict').map((item) => item.conflictSolution);
+  return { conflicts, warnings, executable, skipped, executableBytes, conflictSolutions };
 };
+
+function readFileSyncMetadata(filePath: string): { title?: string; artist?: string; album?: string; duration?: number } | null {
+  try {
+    const stat = statSync(filePath);
+    if (!stat.isFile()) return null;
+    const metadata = parseStream(createReadStream(filePath), filePath, { duration: true, skipCovers: true });
+    return metadata.then(r => ({
+      title: r.common.title ?? undefined,
+      artist: r.common.artist ?? undefined,
+      album: r.common.album ?? undefined,
+      duration: r.format.duration ?? undefined,
+    })).catch(() => null);
+  } catch {
+    return null;
+  }
+}
+
+interface ConflictSolution {
+  itemId: string;
+  targetRelativePath: string;
+  conflictType: 'same_recording' | 'different_recording' | 'same_track_different_album';
+  suggestedAction: 'replace' | 'version' | 'keep_both' | 'review';
+  reason: string;
+  metadataMatch: boolean;
+  durationMatch: boolean | null;
+}
+
+async function classifyConflictSolution(item: any): Promise<ConflictSolution> {
+  const track = item.track;
+  const targetPath = item.target_relative_path;
+  try {
+    const destPath = path.join(item.destination_path ?? '', targetPath);
+    const destMeta = await readTrackMetadata(destPath);
+    if (!destMeta) return { itemId: item.id, trackId: item.trackId, targetRelativePath: targetPath, conflictType: 'different_recording', suggestedAction: 'review', reason: 'No se pudo leer metadatos del destino', metadataMatch: false, durationMatch: null };
+
+    const srcTitle = (track.title || '').normalize('NFC').toLowerCase().trim();
+    const dstTitle = (destMeta.title || '').normalize('NFC').toLowerCase().trim();
+    const srcArtist = (track.artist || '').normalize('NFC').toLowerCase().trim();
+    const dstArtist = (destMeta.artist || '').normalize('NFC').toLowerCase().trim();
+    const srcAlbum = (track.album || '').normalize('NFC').toLowerCase().trim();
+    const dstAlbum = (destMeta.album || '').normalize('NFC').toLowerCase().trim();
+
+    const titleMatch = srcTitle === dstTitle && srcTitle.length > 0;
+    const artistMatch = srcArtist === dstArtist && srcArtist.length > 0;
+    const albumMatch = srcAlbum === dstAlbum && srcAlbum.length > 0;
+    const srcDuration = track.duration ?? 0;
+    const dstDuration = destMeta.duration ?? 0;
+    const durationMatch = srcDuration > 0 && dstDuration > 0 && Math.abs(srcDuration - dstDuration) < 2;
+
+    if (titleMatch && artistMatch && durationMatch) {
+      if (albumMatch) {
+        return { itemId: item.id, trackId: item.trackId, targetRelativePath: targetPath, conflictType: 'same_recording', suggestedAction: 'replace', reason: 'Mismo título, artista, álbum y duración similar: es probablemente la misma grabación. Se puede reemplazar.', metadataMatch: true, durationMatch: true };
+      } else {
+        return { itemId: item.id, trackId: item.trackId, targetRelativePath: targetPath, conflictType: 'same_track_different_album', suggestedAction: 'version', reason: 'Mismo título y artista, pero álbum diferente: probablemente misma canción en álbum/distribución distinta. Se debe versionar o mantener ambos.', metadataMatch: true, durationMatch: true };
+      }
+    }
+    if (titleMatch && artistMatch && !durationMatch) {
+      return { itemId: item.id, trackId: item.trackId, targetRelativePath: targetPath, conflictType: 'different_recording', suggestedAction: 'version', reason: 'Mismo título y artista, pero duración diferente: versión alternativa (en vivo, acoustic, remix, etc). Conservar como versión.', metadataMatch: true, durationMatch: false };
+    }
+    return { itemId: item.id, trackId: item.trackId, targetRelativePath: targetPath, conflictType: 'different_recording', suggestedAction: 'keep_both', reason: 'Título/artista/duración diferentes: archivos distintos. Conservar ambos.', metadataMatch: false, durationMatch: durationMatch };
+  } catch (e) {
+    return { itemId: item.id, trackId: item.trackId, targetRelativePath: targetPath, conflictType: 'different_recording', suggestedAction: 'review', reason: 'Error al analizar el conflicto', metadataMatch: false, durationMatch: null };
+  }
+}
 const foundAudit = (catalog: Catalog, rootId: string) => catalog.db.prepare('SELECT count(*) audioFiles,coalesce(sum(bytes),0) audioBytes FROM tracks WHERE root_id=? AND present=1').get(rootId);
 const spaceSuggestion = async (catalog: Catalog, sourceRootId: string, destinationRootId: string, requiredBytes: number) => {
   const source = catalog.root(sourceRootId); const destination = catalog.root(destinationRootId);
@@ -244,7 +330,7 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
   app.patch('/api/settings', async (request, reply) => {
     const allowed = new Set(['mode', 'internetEnabled', 'openaiEnabled', 'openaiModel', 'musicBrainzContact', 'language', 'theme']); const body = request.body as Body;
     if (!body || typeof body !== 'object' || Array.isArray(body) || Object.keys(body).some((key) => !allowed.has(key))) return reply.code(400).send({ error: 'SETTING_INVALID' });
-    if (body.mode !== undefined && !['simulation', 'safe'].includes(body.mode)) return reply.code(400).send({ error: 'MODE_INVALID' });
+    if (body.mode !== undefined && body.mode !== 'safe') return reply.code(400).send({ error: 'MODE_INVALID' });
     if (body.language !== undefined && !['es', 'en'].includes(body.language)) return reply.code(400).send({ error: 'LANGUAGE_INVALID' });
     if (body.theme !== undefined && !['light', 'tokyo', 'github-dark', 'dracula', 'dark'].includes(body.theme)) return reply.code(400).send({ error: 'THEME_INVALID' });
     if (body.theme === 'dark') body.theme = 'tokyo';
@@ -262,7 +348,7 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
     if (!source || source.role !== 'source' || !destination || destination.role !== 'destination') return reply.code(400).send({ error: 'ROOTS_INVALID' });
     const trackIds = body.all === true ? (catalog.db.prepare('SELECT id FROM tracks WHERE root_id=? AND present=1 ORDER BY relative_path').all(source.id) as Array<{ id: string }>).map((row) => row.id) : Array.isArray(body.trackIds) ? [...new Set(body.trackIds.filter((id): id is string => typeof id === 'string'))] : [];
     if (!trackIds.length) return reply.code(400).send({ error: 'TRACKS_REQUIRED' });
-    const mode = body.mode; if (!['simulation', 'safe'].includes(mode)) return reply.code(400).send({ error: 'PLAN_MODE_INVALID' });
+    const mode = body.mode; if (body.mode !== 'safe') return reply.code(400).send({ error: 'PLAN_MODE_INVALID' });
     const id = randomUUID(); const now = new Date().toISOString();
     const insertPlan = catalog.db.prepare("INSERT INTO organization_plans(id,source_root_id,destination_root_id,status,mode,manifest_json,created_at) VALUES (?,?,?,'preview',?,?,?)");
     const insertItem = catalog.db.prepare('INSERT INTO plan_items(id,plan_id,track_id,source_path,target_relative_path,source_size,source_mtime_ms,source_hash,status) VALUES (?,?,?,?,?,?,?,?,?)');
@@ -271,7 +357,7 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
       for (const trackId of trackIds) {
         const track = catalog.track(trackId); if (!track || track.rootId !== source.id) throw new Error('TRACK_OUTSIDE_SOURCE');
         const targetRelativePath = trackTarget(track); const sourceHash = await sha256File(track.originalPath);
-        const item = { id: randomUUID(), trackId, sourcePath: track.originalPath, targetRelativePath, sourceSize: track.bytes, sourceMtimeMs: track.mtimeMs, sourceHash, status: 'planned' };
+        const item = { id: randomUUID(), trackId, track, sourcePath: track.originalPath, targetRelativePath, sourceSize: track.bytes, sourceMtimeMs: track.mtimeMs, sourceHash, status: 'planned' };
         try {
           const existing = await lstat(path.join(destination.path, targetRelativePath));
           if (existing.isFile() && existing.size === track.bytes && await sha256File(path.join(destination.path, targetRelativePath)) === sourceHash) item.status = 'warning_existing_verified';
@@ -281,16 +367,24 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
       }
       autoVersionInternalCollisions(items);
       const summary = summarizePlanItems(items); planSummary = summary;
+      // Calcular soluciones de conflicto asíncronamente
+      const conflictPromises = items.filter(item => item.status === 'conflict').map(item => classifyConflictSolution(item));
+      const conflictSolutions = await Promise.all(conflictPromises);
+      items.forEach((item, index) => {
+        if (item.status === 'conflict' && conflictSolutions[index]) {
+          item.conflictSolution = conflictSolutions[index];
+        }
+      });
       const requiredBytes = summary.executableBytes; const space = await spaceSuggestion(catalog, source.id, destination.id, requiredBytes); planSpace = space;
       const manifest = JSON.stringify({ mode, ...summary, audit: foundAudit(catalog, source.id), space, rulesVersion: 3, generatedAt: now });
       catalog.db.transaction(() => { insertPlan.run(id, source.id, destination.id, mode, manifest, now); for (const item of items) insertItem.run(item.id,id,item.trackId,item.sourcePath,item.targetRelativePath,item.sourceSize,item.sourceMtimeMs,item.sourceHash,item.status); })();
     } catch (error) { return reply.code(400).send({ error: safeErrorCode(error, 'PLAN_PREVIEW_FAILED') }); }
-    return reply.code(201).send({ id, status: 'preview', revision: 1, mode, ...(planSummary ?? summarizePlanItems(items)), space: planSpace, items: items.map((item) => ({ id: item.id, trackId: item.trackId, sourcePath: catalog.track(item.trackId)?.relativePath, targetRelativePath: item.targetRelativePath, sourceSize: item.sourceSize, sourceMtimeMs: item.sourceMtimeMs, status: item.status, conflict: item.status === 'conflict', warning: item.status.startsWith('warning_') })) });
+    return reply.code(201).send({ id, status: 'preview', revision: 1, mode, ...(planSummary ?? summarizePlanItems(items)), space: planSpace, conflictSolutions: (planSummary ?? summarizePlanItems(items)).conflictSolutions, items: items.map((item) => ({ id: item.id, trackId: item.trackId, sourcePath: catalog.track(item.trackId)?.relativePath, targetRelativePath: item.targetRelativePath, sourceSize: item.sourceSize, sourceMtimeMs: item.sourceMtimeMs, status: item.status, conflict: item.status === 'conflict', warning: item.status.startsWith('warning_') })) });
   });
   app.post('/api/plans/preview-jobs', async (request, reply) => {
     const body = request.body as Body; const source = grants.get(body.sourceRootId); const destination = grants.get(body.destinationRootId);
     if (!source || source.role !== 'source' || !destination || destination.role !== 'destination') return reply.code(400).send({ error: 'ROOTS_INVALID' });
-    const mode = body.mode; if (!['simulation', 'safe'].includes(mode)) return reply.code(400).send({ error: 'PLAN_MODE_INVALID' });
+    const mode = body.mode; if (body.mode !== 'safe') return reply.code(400).send({ error: 'PLAN_MODE_INVALID' });
     const trackIds = body.all === true ? (catalog.db.prepare('SELECT id FROM tracks WHERE root_id=? AND present=1 ORDER BY relative_path').all(source.id) as Array<{ id: string }>).map((row) => row.id) : Array.isArray(body.trackIds) ? [...new Set(body.trackIds.filter((id): id is string => typeof id === 'string'))] : [];
     if (!trackIds.length) return reply.code(400).send({ error: 'TRACKS_REQUIRED' });
     const jobId = randomUUID(); const job = { id: jobId, state: 'queued' as const, phase: 'Preparando revisión', processed: 0, total: trackIds.length, conflicts: 0, warnings: 0 };
@@ -327,17 +421,17 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
     const items = catalog.db.prepare('SELECT * FROM plan_items WHERE plan_id=? ORDER BY rowid').all(id) as any[];
     const approvedPlan = catalog.db.prepare('SELECT manifest_json FROM organization_plans WHERE id=?').get(id) as any; const manifest = JSON.parse(approvedPlan?.manifest_json || '{}');
     const summary = summarizePlanItems(items);
-    return { id, revision: revision + 1, status: 'approved', ...summary, audit: manifest.audit, space: manifest.space, items: items.map((row) => ({ id: row.id, trackId: row.track_id, sourcePath: catalog.track(row.track_id)?.relativePath, targetRelativePath: row.target_relative_path, sourceSize: row.source_size, status: row.status, conflict: row.status === 'conflict', warning: String(row.status).startsWith('warning_') })) };
+    return { id, revision: revision + 1, status: 'approved', ...summary, audit: manifest.audit, space: manifest.space, conflictSolutions: summary.conflictSolutions, items: items.map((row) => ({ id: row.id, trackId: row.track_id, sourcePath: catalog.track(row.track_id)?.relativePath, targetRelativePath: row.target_relative_path, sourceSize: row.source_size, status: row.status, conflict: row.status === 'conflict', warning: String(row.status).startsWith('warning_') })) };
   });
   app.post('/api/plans/:id/apply', async (request, reply) => {
     const id = (request.params as Body).id; const plan: any = catalog.db.prepare('SELECT * FROM organization_plans WHERE id=?').get(id);
     if (!plan || plan.status !== 'approved') return reply.code(409).send({ error: 'PLAN_NOT_APPROVED' });
     const revision = Number((request.body as Body)?.revision); if (!Number.isInteger(revision) || revision !== plan.revision) return reply.code(409).send({ error: 'PLAN_REVISION_STALE' });
-    if (plan.mode !== 'safe') return reply.code(409).send({ error: 'SIMULATION_CANNOT_WRITE' });
     const destination = grants.get(plan.destination_root_id); if (!destination) return reply.code(409).send({ error: 'DESTINATION_NOT_AUTHORIZED' });
     const items = catalog.db.prepare('SELECT * FROM plan_items WHERE plan_id=? ORDER BY rowid').all(id) as any[]; const operations: any[] = []; let copied = 0; let skipped = 0; let failed = 0;
+    const manifest = JSON.parse(plan.manifest_json || '{}'); const space = manifest.space ?? null;
     const filesystem = await statfs(destination.path); const requiredBytes = summarizePlanItems(items).executableBytes;
-    if (!hasSufficientSpace(requiredBytes, filesystem.bavail, filesystem.bsize)) return reply.code(507).send({ error: 'INSUFFICIENT_DESTINATION_SPACE', requiredBytes });
+    if (!space?.sameVolume && !hasSufficientSpace(requiredBytes, filesystem.bavail, filesystem.bsize)) return reply.code(507).send({ error: 'INSUFFICIENT_DESTINATION_SPACE', requiredBytes, availableBytes: filesystem.bavail * filesystem.bsize });
     const claimed = catalog.db.prepare("UPDATE organization_plans SET status='applying',revision=revision+1 WHERE id=? AND status='approved' AND revision=?").run(id,revision);
     if (!claimed.changes) return reply.code(409).send({ error: 'PLAN_ALREADY_CLAIMED' });
     const runApply = async () => {
