@@ -31,6 +31,7 @@ export class RootGrants {
   list(): RootGrant[] { return [...this.#grants.values()].map((grant) => this.#publicGrant(grant)); }
   get(id: string): RootGrant | undefined { const grant = this.#grants.get(id); return grant ? this.#publicGrant(grant) : undefined; }
   revoke(id: string): void { this.#grants.delete(id); }
+  clear(): void { this.#grants.clear(); }
   async resolve(id: string, relativePath: string): Promise<string> {
     const grant = this.#grants.get(id); if (!grant) throw new Error('Raíz no autorizada');
     if (!relativePath || path.isAbsolute(relativePath) || relativePath.split(/[\\/]/).some((part) => part === '..' || part === '.' || part.includes('\0'))) throw new Error('Ruta relativa inválida');

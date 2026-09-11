@@ -125,7 +125,7 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
     const track = catalog.track((request.params as Body).id); if (!track) return reply.code(404).send({ error: 'TRACK_NOT_FOUND' });
     const settings = catalog.settings(); const contact = typeof settings.musicBrainzContact === 'string' && settings.musicBrainzContact ? settings.musicBrainzContact : (process.env.MUSICBRAINZ_CONTACT ?? '');
     let musicBrainz: ((query: { artist: string; title: string; album?: string }) => Promise<any>) | undefined;
-    if (settings.internetEnabled === true && contact) { const client = new MusicBrainzClient({ appName: 'Resonancia', appVersion: '0.1.0', contact, catalog }); musicBrainz = (query) => client.searchRecording(query); }
+    if (settings.internetEnabled === true && contact) { const client = new MusicBrainzClient({ appName: 'RESONANCE', appVersion: '0.1.0', contact, catalog }); musicBrainz = (query) => client.searchRecording(query); }
     return identifyTrackCandidate(track, { musicBrainz, openaiEnabled: settings.openaiEnabled === true && Boolean(runtimeOpenAIKey), openai: (input) => identifyWithOpenAI(input, { apiKey: runtimeOpenAIKey, model: typeof settings.openaiModel === 'string' ? settings.openaiModel : process.env.OPENAI_MODEL }) });
   });
   app.patch('/api/tracks/:id/favorite', async (request, reply) => {
@@ -166,12 +166,18 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
     return { configured: Boolean(runtimeOpenAIKey) };
   });
   app.patch('/api/settings', async (request, reply) => {
-    const allowed = new Set(['mode', 'internetEnabled', 'openaiEnabled', 'openaiModel', 'musicBrainzContact']); const body = request.body as Body;
+    const allowed = new Set(['mode', 'internetEnabled', 'openaiEnabled', 'openaiModel', 'musicBrainzContact', 'language', 'theme']); const body = request.body as Body;
     if (!body || typeof body !== 'object' || Array.isArray(body) || Object.keys(body).some((key) => !allowed.has(key))) return reply.code(400).send({ error: 'SETTING_INVALID' });
     if (body.mode !== undefined && !['simulation', 'safe'].includes(body.mode)) return reply.code(400).send({ error: 'MODE_INVALID' });
+    if (body.language !== undefined && !['es', 'en'].includes(body.language)) return reply.code(400).send({ error: 'LANGUAGE_INVALID' });
+    if (body.theme !== undefined && !['light', 'dark'].includes(body.theme)) return reply.code(400).send({ error: 'THEME_INVALID' });
     for (const key of ['internetEnabled','openaiEnabled']) if (body[key] !== undefined && typeof body[key] !== 'boolean') return reply.code(400).send({ error: 'SETTING_INVALID' });
     for (const key of ['openaiModel','musicBrainzContact']) if (body[key] !== undefined && body[key] !== null && (typeof body[key] !== 'string' || body[key].length < 1 || body[key].length > 128)) return reply.code(400).send({ error: 'SETTING_INVALID' });
     return catalog.updateSettings(body);
+  });
+  app.post('/api/maintenance/reset', async () => {
+    catalog.resetAll(); grants.clear(); runtimeOpenAIKey = '';
+    return { ok: true };
   });
 
   app.post('/api/plans/preview', async (request, reply) => {

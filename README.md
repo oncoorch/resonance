@@ -1,4 +1,4 @@
-# Resonancia — Music Library Organizer
+# RESONANCE — Music Library Organizer
 
 Aplicación web local para analizar, revisar y organizar bibliotecas musicales grandes **sin convertir audio, sin borrar originales y sin login visible**.
 
@@ -101,10 +101,10 @@ En macOS, para el flujo completo con selector nativo, se recomienda producción 
 
 1. Termina y verifica la organización.
 2. En Música, añade la carpeta organizada a la biblioteca.
-3. Exporta playlist desde Resonancia como Apple XML o M3U8.
+3. Exporta playlist desde RESONANCE como Apple XML o M3U8.
 4. En Música usa **Archivo → Biblioteca → Importar playlist**.
 
-Resonancia no modifica `Music Library.musiclibrary` ni usa APIs privadas de Apple.
+RESONANCE no modifica `Music Library.musiclibrary` ni usa APIs privadas de Apple.
 
 ## Pruebas
 

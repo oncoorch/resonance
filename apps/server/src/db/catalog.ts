@@ -39,7 +39,7 @@ export class Catalog {
     const trackColumns = new Set((this.db.pragma('table_info(tracks)') as any[]).map((row) => row.name));
     if (!trackColumns.has('present')) this.db.exec('ALTER TABLE tracks ADD COLUMN present INTEGER NOT NULL DEFAULT 1');
     this.db.prepare("UPDATE organization_plans SET status='recovery_required' WHERE status='applying'").run();
-    this.setDefault('mode', 'simulation'); this.setDefault('internetEnabled', false); this.setDefault('openaiEnabled', false);
+    this.setDefault('mode', 'simulation'); this.setDefault('internetEnabled', false); this.setDefault('openaiEnabled', false); this.setDefault('language', 'es'); this.setDefault('theme', 'light');
   }
   close(): void { this.db.close(); }
   addRoot(root: { id: string; path: string; role: string; createdAt: string }): void { this.db.prepare('INSERT OR REPLACE INTO roots VALUES (?,?,?,?)').run(root.id, root.role, root.path, root.createdAt); }
@@ -74,6 +74,12 @@ export class Catalog {
   private setDefault(key: string, value: unknown): void { this.db.prepare('INSERT OR IGNORE INTO settings VALUES (?,?)').run(key, JSON.stringify(value)); }
   settings(): Record<string, unknown> { return Object.fromEntries((this.db.prepare('SELECT * FROM settings').all() as any[]).map((r) => [r.key, JSON.parse(r.value_json)])); }
   updateSettings(values: Record<string, unknown>): Record<string, unknown> { const put = this.db.prepare('INSERT OR REPLACE INTO settings VALUES (?,?)'); this.db.transaction(() => Object.entries(values).forEach(([k,v]) => put.run(k, JSON.stringify(v))))(); return this.settings(); }
+  resetAll(): void {
+    this.db.transaction(() => {
+      for (const table of ['playlist_tracks','playlists','operations','plan_items','organization_plans','errors','tracks','jobs','roots','search_cache','settings']) this.db.prepare(`DELETE FROM ${table}`).run();
+      this.setDefault('mode', 'simulation'); this.setDefault('internetEnabled', false); this.setDefault('openaiEnabled', false); this.setDefault('language', 'es'); this.setDefault('theme', 'light');
+    })();
+  }
   cacheGet(provider: string, key: string): unknown | undefined { const r: any = this.db.prepare('SELECT response_json FROM search_cache WHERE provider=? AND cache_key=? AND expires_at>?').get(provider,key,Date.now()); return r ? JSON.parse(r.response_json) : undefined; }
   cachePut(provider: string, key: string, value: unknown, ttlMs: number): void { this.db.prepare('INSERT OR REPLACE INTO search_cache VALUES (?,?,?,?)').run(provider,key,JSON.stringify(value),Date.now()+ttlMs); }
 }

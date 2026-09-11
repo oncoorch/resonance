@@ -70,6 +70,9 @@ describe('backend API vertical', () => {
     expect((await app.inject({ method: 'PATCH', url: '/api/settings', headers: authHeaders, payload: { internetEnabled: {} } })).statusCode).toBe(400);
     expect((await app.inject({ method: 'PATCH', url: '/api/settings', headers: authHeaders, payload: { openaiModel: 'x'.repeat(200) } })).statusCode).toBe(400);
     expect((await app.inject({ url: '/api/settings', headers: { ...hosts, cookie: authHeaders.cookie } })).json()).toMatchObject({ mode: 'safe', internetEnabled: false });
+    expect((await app.inject({ method: 'POST', url: '/api/maintenance/reset', headers: authHeaders })).statusCode).toBe(200);
+    expect((await app.inject({ url: '/api/tracks', headers: authHeaders })).json()).toMatchObject({ total: 0, items: [] });
+    expect((await app.inject({ url: '/api/roots', headers: authHeaders })).json()).toMatchObject({ roots: [] });
   });
 
   it('keeps playlists locked until one organization plan is fully verified', async () => {

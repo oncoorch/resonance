@@ -1,7 +1,7 @@
 # AGENTE.md — guía para agentes IA
 
 ## Proyecto
-Resonancia es una aplicación web local para organizar bibliotecas musicales grandes en macOS + Chrome. Debe operar de forma conservadora: leer primero, simular/revisar, aprobar, aplicar en modo seguro y conservar originales.
+RESONANCE es una aplicación web local para organizar bibliotecas musicales grandes en macOS + Chrome. Debe operar de forma conservadora: leer primero, simular/revisar, aprobar, aplicar en modo seguro y conservar originales.
 
 ## Invariantes no negociables
 - No repetir ni almacenar claves API compartidas por el usuario. Cualquier key vista en chat se considera comprometida y debe revocarse.

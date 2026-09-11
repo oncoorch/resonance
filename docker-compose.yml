@@ -11,6 +11,6 @@ services:
       - resonance-data:/data
       # Monta música/destino explícitamente si usas Docker:
       # - /Users/Rattio/Downloads/Pulga Music:/music/source:ro
-      # - /Users/Rattio/Music/Resonancia:/music/destination
+      # - /Users/Rattio/Music/RESONANCE:/music/destination
 volumes:
   resonance-data:
