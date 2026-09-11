@@ -83,6 +83,17 @@ describe('backend API vertical', () => {
     expect((await app.inject({ url: '/api/playlists', headers: authHeaders })).statusCode).toBe(423);
   });
 
+  it('moves tracks to trash instead of deleting them irreversibly', async () => {
+    const { app, source, authHeaders } = await fixture();
+    const root = await app.inject({ method: 'POST', url: '/api/roots/authorize', headers: authHeaders, payload: { path: source, role: 'source' } });
+    await app.inject({ method: 'POST', url: '/api/scan', headers: authHeaders, payload: { rootId: root.json().id } });
+    const track = (await app.inject({ url: '/api/tracks', headers: authHeaders })).json().items[0];
+    const deleted = await app.inject({ method: 'DELETE', url: `/api/tracks/${track.id}`, headers: authHeaders });
+    expect(deleted.statusCode).toBe(204);
+    expect((await app.inject({ url: '/api/tracks', headers: authHeaders })).json()).toMatchObject({ total: 0, items: [] });
+    await expect(stat(path.join(source, track.originalPath))).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
   it('hashes scanned audio and reports exact duplicate members', async () => {
     const { app, source, authHeaders } = await fixture();
     await writeFile(path.join(source, 'same-bytes.wav'), await readFile(path.join(source, 'Björk', 'Debut', '01 - Human Behaviour.wav')));

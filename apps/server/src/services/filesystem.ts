@@ -4,8 +4,11 @@ import { lstat, link, mkdir, open, realpath, rename, rm } from 'node:fs/promises
 import type { FileHandle } from 'node:fs/promises';
 import path from 'node:path';
 import { pipeline } from 'node:stream/promises';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 
 interface PathIdentity { path: string; dev: number; ino: number }
+const execFileAsync = promisify(execFile);
 
 function securityError(message: string, code = 'ELOOP'): Error & { code: string } {
   return Object.assign(new Error(message), { code });
@@ -188,5 +191,26 @@ export async function removeVerifiedFile(target: string, expectedHash: string): 
   } finally {
     await handle.close().catch(() => undefined);
     if (moved) { /* An unverified quarantine is deliberately preserved. */ }
+  }
+}
+
+export async function moveVerifiedFileToTrash(target: string, expectedHash: string): Promise<void> {
+  const ancestry = await captureExistingPath(target, true);
+  const handle = await open(target, noFollowReadFlags());
+  try {
+    const identity = await handle.stat();
+    if (!identity.isFile()) throw securityError('El destino no es un archivo regular', 'EINVAL');
+    if (await hashHandle(handle) !== expectedHash) throw securityError('El archivo cambió; borrado bloqueado', 'HASH_MISMATCH');
+    await revalidate(ancestry);
+    if (process.platform === 'darwin') {
+      await execFileAsync('osascript', ['-e', `tell application "Finder" to delete POSIX file ${JSON.stringify(target)}`]);
+      return;
+    }
+    const trash = path.join(process.env.XDG_DATA_HOME ?? path.join(process.env.HOME ?? '.', '.local', 'share'), 'Trash', 'files');
+    await mkdir(trash, { recursive: true, mode: 0o700 });
+    const destination = path.join(trash, `${path.basename(target)}.${randomUUID()}`);
+    await rename(target, destination);
+  } finally {
+    await handle.close().catch(() => undefined);
   }
 }

@@ -11,7 +11,7 @@ export interface Track {
   id: string; originalTitle: string; title: string | null; artist: string | null; album: string | null;
   year: number | null; genre: string | null; trackNumber: number | null; format: string; quality: string | null;
   confidence: number | null; source: 'local' | 'path' | 'musicbrainz' | 'openai' | 'manual' | null;
-  status: string; favorite: boolean; originalPath?: string; finalPath?: string;
+  status: string; favorite: boolean; originalPath?: string; finalPath?: string; sha256?: string | null;
 }
 export interface ScanAudit { directories?: number; entries?: number; audioFiles?: number; nonAudioFiles?: number; audioBytes?: number; totalBytes?: number }
 export interface ScanJob { id: string; state: 'queued' | 'running' | 'paused' | 'cancel_requested' | 'cancelled' | 'completed' | 'failed'; phase?: string; discovered: number; processed: number; errors: number; audit?: ScanAudit }

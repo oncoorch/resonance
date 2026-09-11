@@ -8,7 +8,7 @@ import { Catalog } from './db/catalog.js';
 import { RootGrants, type RootRole } from './security/root-grants.js';
 import { scanAudioFiles } from './services/scanner.js';
 import { readTrackMetadata } from './services/metadata.js';
-import { copyVerifiedNoClobber, hasSufficientSpace, removeVerifiedFile, sha256File, sourceSnapshotMatches, writeTextNoClobber } from './services/filesystem.js';
+import { copyVerifiedNoClobber, hasSufficientSpace, moveVerifiedFileToTrash, removeVerifiedFile, sha256File, sourceSnapshotMatches, writeTextNoClobber } from './services/filesystem.js';
 import { exportAppleXml, exportM3U8 } from './services/playlists.js';
 import { pickDirectoryMacOS } from './platform/macos/folder-picker.js';
 import { MusicBrainzClient } from './services/providers/musicbrainz.js';
@@ -198,6 +198,31 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
     if (typeof value !== 'boolean') return reply.code(400).send({ error: 'FAVORITE_INVALID' });
     if (!catalog.setFavorite((request.params as Body).id, value)) return reply.code(404).send({ error: 'TRACK_NOT_FOUND' });
     return publicTrack(catalog.track((request.params as Body).id));
+  });
+  app.delete('/api/tracks/:id', async (request, reply) => {
+    const track = catalog.track((request.params as Body).id);
+    if (!track) return reply.code(404).send({ error: 'TRACK_NOT_FOUND' });
+    const root = grants.get(track.rootId); if (!root) return reply.code(409).send({ error: 'SOURCE_NOT_AUTHORIZED' });
+    const resolved = await grants.resolve(track.rootId, track.relativePath);
+    if (resolved !== track.originalPath) return reply.code(409).send({ error: 'SOURCE_CAPABILITY_MISMATCH' });
+    await moveVerifiedFileToTrash(resolved, track.sha256);
+    catalog.markTrackAbsent(track.id);
+    return reply.code(204).send();
+  });
+  app.post('/api/tracks/batch', async (request, reply) => {
+    const ids = (request.body as Body)?.ids;
+    if (!Array.isArray(ids) || ids.length === 0 || ids.some((id) => typeof id !== 'string')) return reply.code(400).send({ error: 'TRACK_BATCH_INVALID' });
+    const results: Array<{ id: string; status: 'deleted' | 'failed'; error?: string }> = [];
+    for (const id of [...new Set(ids)]) {
+      try {
+        const track = catalog.track(id); if (!track) throw Object.assign(new Error('TRACK_NOT_FOUND'), { code: 'TRACK_NOT_FOUND' });
+        const root = grants.get(track.rootId); if (!root) throw Object.assign(new Error('SOURCE_NOT_AUTHORIZED'), { code: 'SOURCE_NOT_AUTHORIZED' });
+        const resolved = await grants.resolve(track.rootId, track.relativePath);
+        if (resolved !== track.originalPath) throw Object.assign(new Error('SOURCE_CAPABILITY_MISMATCH'), { code: 'SOURCE_CAPABILITY_MISMATCH' });
+        await moveVerifiedFileToTrash(resolved, track.sha256); catalog.markTrackAbsent(track.id); results.push({ id, status: 'deleted' });
+      } catch (error) { results.push({ id, status: 'failed', error: safeErrorCode(error, 'TRACK_DELETE_FAILED') }); }
+    }
+    return { deleted: results.filter((item) => item.status === 'deleted').length, failed: results.filter((item) => item.status === 'failed').length, results };
   });
   app.get('/api/tracks/:id/audio', async (request, reply) => {
     const track = catalog.track((request.params as Body).id); if (!track) return reply.code(404).send({ error: 'TRACK_NOT_FOUND' });

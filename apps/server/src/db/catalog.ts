@@ -23,7 +23,7 @@ export interface TrackInput {
   metadataSource: string;
 }
 
-const camelTrack = (row: any) => row && ({ id: row.id, rootId: row.root_id, relativePath: row.relative_path, originalPath: row.original_path, finalPath: row.final_path, originalFilename: row.original_filename, title: row.title, artist: row.artist, album: row.album, albumArtist: row.album_artist, year: row.year, trackNo: row.track_no, discNo: row.disc_no, genre: row.genre, duration: row.duration, format: row.format, codec: row.codec, bytes: row.bytes, mtimeMs: row.mtime_ms, metadataSource: row.metadata_source, favorite: Boolean(row.favorite), scanDate: row.scan_date });
+const camelTrack = (row: any) => row && ({ id: row.id, rootId: row.root_id, relativePath: row.relative_path, originalPath: row.original_path, finalPath: row.final_path, originalFilename: row.original_filename, title: row.title, artist: row.artist, album: row.album, albumArtist: row.album_artist, year: row.year, trackNo: row.track_no, discNo: row.disc_no, genre: row.genre, duration: row.duration, format: row.format, codec: row.codec, bytes: row.bytes, mtimeMs: row.mtime_ms, sha256: row.sha256, metadataSource: row.metadata_source, favorite: Boolean(row.favorite), scanDate: row.scan_date });
 
 export class Catalog {
   readonly db: Database.Database;
@@ -69,6 +69,7 @@ export class Catalog {
     return { items, total };
   }
   track(id: string): any { return camelTrack(this.db.prepare('SELECT * FROM tracks WHERE id=? AND present=1').get(id)); }
+  markTrackAbsent(id: string): boolean { return this.db.prepare('UPDATE tracks SET present=0 WHERE id=? AND present=1').run(id).changes === 1; }
   setFavorite(id: string, value: boolean): boolean { return this.db.prepare('UPDATE tracks SET favorite=? WHERE id=?').run(value ? 1 : 0, id).changes === 1; }
   setFinalPath(id: string, finalPath: string): void { this.db.prepare('UPDATE tracks SET final_path=? WHERE id=?').run(finalPath, id); }
   stats(): Record<string, number> { const t: any = this.db.prepare('SELECT count(*) tracks,sum(favorite) favorites,count(DISTINCT artist) artists,count(DISTINCT album) albums,coalesce(sum(bytes),0) bytes FROM tracks WHERE present=1').get(); const e: any = this.db.prepare('SELECT count(*) errors FROM errors').get(); return { tracks: t.tracks, favorites: t.favorites ?? 0, artists: t.artists, albums: t.albums, bytes: t.bytes, errors: e.errors }; }
