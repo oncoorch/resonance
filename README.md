@@ -134,3 +134,5 @@ Los fixtures son sintéticos y no contienen música del usuario.
 - `docs/SECURITY.md`: modelo de confianza y límites.
 - `docs/SUPPORT.md`: formatos y soporte.
 - `docs/TEST-RESULTS.md`: evidencia de pruebas.
+- `docs/MANUAL.md`: guía de uso por tareas y dispositivos.
+- `docs/architecture/`: modelos de arquitectura en C4 (contexto, contenedores, componentes y, si aplica, despliegue).
